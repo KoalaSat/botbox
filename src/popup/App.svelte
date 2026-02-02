@@ -1,216 +1,314 @@
 <script lang="ts">
-  import { sendToBackground, sendToActiveTab, MessageType } from '../shared/messaging';
-  
-  let message = $state('');
-  let response = $state('');
-  let pageInfo = $state<{ title: string; url: string } | null>(null);
-  let loading = $state(false);
+  import { onMount } from 'svelte';
+  import { sendToBackground } from '../shared/messaging';
+  import { MessageType } from '../shared/messaging';
+  import type { UserData, StoredContact } from '../services/db';
+    import { nip19 } from 'nostr-tools';
 
-  async function pingBackground() {
-    loading = true;
-    const result = await sendToBackground({ type: MessageType.PING });
-    response = result.success ? `Background says: ${result.data}` : `Error: ${result.error}`;
-    loading = false;
-  }
+  let isLoggedIn = false;
+  let isLoading = false;
+  let error = '';
+  let userData: UserData | null = null;
+  let contacts: StoredContact[] = [];
+  let isFetchingContacts = false;
 
-  async function pingContentScript() {
-    loading = true;
-    const result = await sendToActiveTab({ type: MessageType.PING });
-    if (result.success) {
-      response = `Content script says: ${result.data}`;
-    } else {
-      response = `Error: ${result.error}. Note: Content scripts don't work on chrome://, edge://, or extension pages. Try a regular webpage.`;
+  /**
+   * Handle storage changes - refresh data when updated
+   */
+  async function handleStorageChange(changes: { [key: string]: chrome.storage.StorageChange }, areaName: string) {
+    if (areaName !== 'local') return;
+    
+    // Check if userData or contactProfiles were updated
+    if (changes.userData || changes.contactProfiles) {
+      console.log('Storage changed, refreshing UI...');
+      
+      // Re-check login status and fetch fresh data
+      await checkLoginStatus();
     }
-    loading = false;
   }
 
-  async function getPageInfo() {
-    loading = true;
-    const result = await sendToActiveTab({ type: MessageType.GET_DATA });
-    if (result.success) {
-      pageInfo = result.data;
-      response = 'Page info retrieved successfully';
-    } else {
-      response = `Error: ${result.error}. Try opening a regular webpage (e.g., https://example.com)`;
+  onMount(() => {
+    // Only check if already logged in, don't auto-connect
+    checkLoginStatus();
+    
+    // Listen for storage changes to auto-refresh data
+    chrome.storage.onChanged.addListener(handleStorageChange);
+    
+    // Cleanup listener on unmount
+    return () => {
+      chrome.storage.onChanged.removeListener(handleStorageChange);
+    };
+  });
+
+  async function checkLoginStatus() {
+    try {
+      const response = await sendToBackground({
+        type: MessageType.GET_LOGIN_STATUS,
+      });
+
+      if (response.success && response.data) {
+        isLoggedIn = response.data.isLoggedIn;
+        userData = response.data.userData;
+        
+        if (isLoggedIn) {
+          await fetchContacts();
+        }
+      }
+    } catch (err) {
+      console.error('Error checking login status:', err);
     }
-    loading = false;
   }
 
-  async function sendNotification() {
-    if (!message.trim()) {
-      response = 'Please enter a message';
+  async function handleLogin() {
+    isLoading = true;
+    error = '';
+
+    try {
+      // Connect to NIP-07 via tab injection (background handles this)
+      const connectResponse = await sendToBackground({
+        type: MessageType.CONNECT_NIP07,
+      });
+
+      if (!connectResponse.success) {
+        throw new Error(connectResponse.error || 'Failed to connect with NIP-07');
+      }
+
+      const { pubkey, relays } = connectResponse.data;
+
+      // Send login request to background
+      const loginResponse = await sendToBackground({
+        type: MessageType.NIP07_LOGIN,
+        payload: { pubkey, relays },
+      });
+
+      if (loginResponse.success) {
+        userData = loginResponse.data;
+        isLoggedIn = true;
+        
+        // Wait a bit for background to fetch data
+        setTimeout(async () => {
+          await fetchContacts();
+        }, 2000);
+      } else {
+        throw new Error(loginResponse.error || 'Login failed');
+      }
+    } catch (err) {
+      console.error('Login error:', err);
+      error = err instanceof Error ? err.message : 'Unknown error occurred';
+    } finally {
+      isLoading = false;
+    }
+  }
+
+  async function fetchContacts() {
+    isFetchingContacts = true;
+    try {
+      const response = await sendToBackground({
+        type: MessageType.FETCH_CONTACTS,
+      });
+
+      if (response.success) {
+        contacts = response.data || [];
+      }
+    } catch (err) {
+      console.error('Error fetching contacts:', err);
+    } finally {
+      isFetchingContacts = false;
+    }
+  }
+
+  async function refreshUserData() {
+    isLoading = true;
+    error = '';
+    try {
+      const response = await sendToBackground({
+        type: MessageType.FETCH_USER_DATA,
+      });
+
+      if (response.success) {
+        userData = response.data;
+        await fetchContacts();
+      } else {
+        throw new Error(response.error || 'Failed to refresh data');
+      }
+    } catch (err) {
+      console.error('Error refreshing data:', err);
+      error = err instanceof Error ? err.message : 'Failed to refresh data';
+    } finally {
+      isLoading = false;
+    }
+  }
+
+  async function removeContact(pubkey: string) {
+    if (!confirm('Are you sure you want to remove this contact? This will publish a new contact list to the relays.')) {
       return;
     }
-    
-    loading = true;
-    const result = await sendToActiveTab({ 
-      type: MessageType.NOTIFY,
-      payload: { message: message }
-    });
-    if (result.success) {
-      response = 'Notification sent to page';
-    } else {
-      response = `Error: ${result.error}. Try opening a regular webpage (e.g., https://example.com)`;
+
+    isLoading = true;
+    error = '';
+    try {
+      const response = await sendToBackground({
+        type: MessageType.REMOVE_CONTACT,
+        payload: { pubkey },
+      });
+
+      if (response.success) {
+        await fetchContacts();
+      } else {
+        throw new Error(response.error || 'Failed to remove contact');
+      }
+    } catch (err) {
+      console.error('Error removing contact:', err);
+      error = err instanceof Error ? err.message : 'Failed to remove contact';
+    } finally {
+      isLoading = false;
     }
-    loading = false;
+  }
+
+  async function handleLogout() {
+    if (!confirm('Are you sure you want to logout? This will clear all local data.')) {
+      return;
+    }
+
+    isLoading = true;
+    try {
+      const response = await sendToBackground({
+        type: MessageType.LOGOUT,
+      });
+
+      if (response.success) {
+        isLoggedIn = false;
+        userData = null;
+        contacts = [];
+      }
+    } catch (err) {
+      console.error('Error logging out:', err);
+    } finally {
+      isLoading = false;
+    }
+  }
+
+  function formatPubkey(pubkey: string): string {
+    const npub = nip19.npubEncode(pubkey)
+    return `${npub.substring(0, 8)}...${npub.substring(npub.length - 8)}`;
+  }
+
+  function formatTimestamp(timestamp: number): string {
+    const date = new Date(timestamp);
+    return date.toLocaleString();
+  }
+
+  function openContactsPage() {
+    chrome.tabs.create({
+      url: chrome.runtime.getURL('contacts.html')
+    });
+  }
+
+  function openRelaysPage() {
+    chrome.tabs.create({
+      url: chrome.runtime.getURL('relays.html')
+    });
   }
 </script>
 
 <main>
-  <div class="container">
-    <h1>Nostr Agenda</h1>
-    <p class="subtitle">Browser Extension Demo</p>
+  <div class="header">
+    <h1>⚡ Nostr Contacts</h1>
+  </div>
 
-    <div class="section">
-      <h2>Test Communication</h2>
-      
-      <div class="button-group">
-        <button onclick={pingBackground} disabled={loading}>
-          Ping Background
+  {#if error}
+    <div class="error">
+      {error}
+      <button on:click={() => error = ''}>✕</button>
+    </div>
+  {/if}
+
+  {#if !isLoggedIn}
+    <div class="login-container">
+      <p class="info">
+        Connect with your Nostr extension (NIP-07) to manage your contacts.
+      </p>
+      <p class="info-small">
+        Required: Alby, nos2x, or another NIP-07 compatible extension
+      </p>
+      <button 
+        class="btn-primary" 
+        on:click={handleLogin} 
+        disabled={isLoading}
+      >
+        {isLoading ? 'Connecting...' : 'Connect with NIP-07'}
+      </button>
+    </div>
+  {:else}
+    <div class="user-info">
+      <div class="profile">
+        {#if userData?.profile?.picture}
+          <img src={userData.profile.picture} alt="Profile" class="avatar" />
+        {:else}
+          <div class="avatar-placeholder">👤</div>
+        {/if}
+        <div class="profile-details">
+          <div class="name">
+            {userData?.profile?.display_name || userData?.profile?.name || 'Anonymous'}
+          </div>
+          <div class="pubkey" title={userData?.pubkey}>
+            {formatPubkey(userData?.pubkey || '')}
+          </div>
+        </div>
+      </div>
+      <div class="actions">
+        <button 
+          class="btn-small" 
+          on:click={refreshUserData} 
+          disabled={isLoading}
+          title="Refresh data from relays"
+        >
+          🔄
         </button>
-        
-        <button onclick={pingContentScript} disabled={loading}>
-          Ping Content Script
-        </button>
-        
-        <button onclick={getPageInfo} disabled={loading}>
-          Get Page Info
+        <button 
+          class="btn-small" 
+          on:click={handleLogout} 
+          disabled={isLoading}
+          title="Logout"
+        >
+          🚪
         </button>
       </div>
+    </div>
 
-      {#if response}
-        <div class="response">{response}</div>
+    <div class="stats">
+      <div 
+        class="stat stat-clickable" 
+        on:click={openContactsPage}
+        on:keydown={(e) => e.key === 'Enter' && openContactsPage()}
+        role="button"
+        tabindex="0"
+        title="Click to view all contacts"
+      >
+        <div class="stat-value">{contacts.length}</div>
+        <div class="stat-label">Contacts</div>
+      </div>
+      <div 
+        class="stat stat-clickable" 
+        on:click={openRelaysPage}
+        on:keydown={(e) => e.key === 'Enter' && openRelaysPage()}
+        role="button"
+        tabindex="0"
+        title="Click to view all relays"
+      >
+        <div class="stat-value">{userData?.relays.length || 0}</div>
+        <div class="stat-label">Relays</div>
+      </div>
+      {#if userData?.lastUpdated}
+        <div class="stat">
+          <div class="stat-value-small">{formatTimestamp(userData.lastUpdated)}</div>
+          <div class="stat-label">Last Updated</div>
+        </div>
       {/if}
     </div>
 
-    {#if pageInfo}
-      <div class="section">
-        <h2>Current Page</h2>
-        <div class="info-box">
-          <p><strong>Title:</strong> {pageInfo.title}</p>
-          <p><strong>URL:</strong> {pageInfo.url}</p>
-        </div>
-      </div>
-    {/if}
-
-    <div class="section">
-      <h2>Send Notification to Page</h2>
-      <input
-        type="text"
-        bind:value={message}
-        placeholder="Enter message..."
-        disabled={loading}
-      />
-      <button onclick={sendNotification} disabled={loading}>
-        Send to Page
-      </button>
+    <div class="info-box">
+      <p>Click on the <strong>Contacts</strong> or <strong>Relays</strong> cards above to view them in a new tab.</p>
     </div>
-  </div>
+  {/if}
 </main>
-
-<style>
-  .container {
-    padding: 20px;
-    width: 400px;
-  }
-
-  h1 {
-    margin: 0 0 5px 0;
-    font-size: 24px;
-    color: #646cff;
-  }
-
-  .subtitle {
-    margin: 0 0 20px 0;
-    font-size: 14px;
-    color: #888;
-  }
-
-  .section {
-    margin-bottom: 20px;
-    padding-bottom: 20px;
-    border-bottom: 1px solid #333;
-  }
-
-  .section:last-child {
-    border-bottom: none;
-  }
-
-  h2 {
-    margin: 0 0 12px 0;
-    font-size: 16px;
-    color: #888;
-  }
-
-  .button-group {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin-bottom: 12px;
-  }
-
-  button {
-    flex: 1;
-    min-width: 120px;
-  }
-
-  button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .response {
-    padding: 12px;
-    background-color: #1a1a1a;
-    border-radius: 4px;
-    font-size: 14px;
-    word-break: break-word;
-  }
-
-  .info-box {
-    background-color: #1a1a1a;
-    padding: 12px;
-    border-radius: 4px;
-    font-size: 14px;
-  }
-
-  .info-box p {
-    margin: 8px 0;
-  }
-
-  .info-box strong {
-    color: #646cff;
-  }
-
-  input {
-    width: 100%;
-    padding: 8px 12px;
-    margin-bottom: 8px;
-    border: 1px solid #333;
-    border-radius: 4px;
-    background-color: #1a1a1a;
-    color: inherit;
-    font-family: inherit;
-    font-size: 14px;
-    box-sizing: border-box;
-  }
-
-  input:focus {
-    outline: none;
-    border-color: #646cff;
-  }
-
-  input:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  @media (prefers-color-scheme: light) {
-    .response,
-    .info-box,
-    input {
-      background-color: #f5f5f5;
-      border-color: #ddd;
-    }
-  }
-</style>

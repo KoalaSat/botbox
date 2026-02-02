@@ -10,6 +10,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         popup: resolve(__dirname, 'popup.html'),
+        contacts: resolve(__dirname, 'contacts.html'),
+        relays: resolve(__dirname, 'relays.html'),
         background: resolve(__dirname, 'src/background/background.ts'),
         content: resolve(__dirname, 'src/content/content.ts'),
       },
@@ -23,13 +25,9 @@ export default defineConfig({
         },
         chunkFileNames: 'assets/[name]-[hash].js',
         assetFileNames: 'assets/[name]-[hash].[ext]',
+        format: 'es', // Use ES modules format
         // Prevent code splitting for background and content scripts
-        manualChunks: (id) => {
-          // Don't create separate chunks for background/content dependencies
-          if (id.includes('src/background') || id.includes('src/content') || id.includes('src/shared')) {
-            return undefined;
-          }
-        },
+        manualChunks: undefined,
       },
     },
     outDir: 'dist',

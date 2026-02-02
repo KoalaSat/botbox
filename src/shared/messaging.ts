@@ -8,6 +8,15 @@ export enum MessageType {
   SET_DATA = 'SET_DATA',
   NOTIFY = 'NOTIFY',
   PING = 'PING',
+  
+  // Nostr operations
+  CONNECT_NIP07 = 'CONNECT_NIP07',
+  NIP07_LOGIN = 'NIP07_LOGIN',
+  FETCH_USER_DATA = 'FETCH_USER_DATA',
+  FETCH_CONTACTS = 'FETCH_CONTACTS',
+  REMOVE_CONTACT = 'REMOVE_CONTACT',
+  LOGOUT = 'LOGOUT',
+  GET_LOGIN_STATUS = 'GET_LOGIN_STATUS',
 }
 
 export interface Message {

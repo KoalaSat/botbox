@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Nostr Agenda",
-  "version": "0.0.1",
-  "description": "A browser extension for Nostr Agenda",
+  "name": "Nostr Contacts Manager",
+  "version": "1.0.0",
+  "description": "Manage your Nostr contacts locally with NIP-02 and NIP-07 support",
   "icons": {
     "16": "vite.svg",
     "48": "vite.svg",
@@ -17,7 +17,8 @@
     }
   },
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "content_scripts": [
     {
@@ -33,6 +34,8 @@
     "scripting"
   ],
   "host_permissions": [
-    "https://*/*"
+    "https://*/*",
+    "wss://*/*",
+    "ws://*/*"
   ]
 }
