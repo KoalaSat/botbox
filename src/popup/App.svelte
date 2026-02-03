@@ -3,7 +3,10 @@
   import { sendToBackground } from '../shared/messaging';
   import { MessageType } from '../shared/messaging';
   import type { UserData, StoredContact } from '../services/db';
-    import { nip19 } from 'nostr-tools';
+  import Contacts from '../contacts/Contacts.svelte';
+  import Relays from '../relays/Relays.svelte';
+  import { Zap, User, RefreshCw, LogOut, X, ExternalLink, ArrowLeft } from 'lucide-svelte';
+  import { formatPubkey } from '../shared/formatters';
 
   let isLoggedIn = false;
   let isLoading = false;
@@ -11,6 +14,9 @@
   let userData: UserData | null = null;
   let contacts: StoredContact[] = [];
   let isFetchingContacts = false;
+  let currentView: 'home' | 'contacts' | 'relays' = 'home';
+  let contactsComponent: Contacts;
+  let relaysComponent: Relays;
 
   /**
    * Handle storage changes - refresh data when updated
@@ -28,8 +34,12 @@
   }
 
   onMount(() => {
-    // Only check if already logged in, don't auto-connect
-    checkLoginStatus();
+    // Check if already logged in and refresh data
+    checkLoginStatus().then(async () => {
+      if (isLoggedIn) {
+        await refreshData();
+      }
+    });
     
     // Listen for storage changes to auto-refresh data
     chrome.storage.onChanged.addListener(handleStorageChange);
@@ -117,17 +127,24 @@
     }
   }
 
-  async function refreshUserData() {
+  async function refreshData() {
     isLoading = true;
     error = '';
     try {
       const response = await sendToBackground({
-        type: MessageType.FETCH_USER_DATA,
+        type: MessageType.REFRESH_DATA,
       });
 
       if (response.success) {
         userData = response.data;
         await fetchContacts();
+        
+        // Also refresh the current view's specific data
+        if (currentView === 'contacts' && contactsComponent) {
+          await contactsComponent.fetchContacts();
+        } else if (currentView === 'relays' && relaysComponent) {
+          await relaysComponent.fetchRelays();
+        }
       } else {
         throw new Error(response.error || 'Failed to refresh data');
       }
@@ -180,6 +197,7 @@
         isLoggedIn = false;
         userData = null;
         contacts = [];
+        currentView = 'home';
       }
     } catch (err) {
       console.error('Error logging out:', err);
@@ -188,38 +206,28 @@
     }
   }
 
-  function formatPubkey(pubkey: string): string {
-    const npub = nip19.npubEncode(pubkey)
-    return `${npub.substring(0, 8)}...${npub.substring(npub.length - 8)}`;
+  function showContacts() {
+    currentView = 'contacts';
   }
 
-  function formatTimestamp(timestamp: number): string {
-    const date = new Date(timestamp);
-    return date.toLocaleString();
+  function showRelays() {
+    currentView = 'relays';
   }
 
-  function openContactsPage() {
-    chrome.tabs.create({
-      url: chrome.runtime.getURL('contacts.html')
-    });
-  }
-
-  function openRelaysPage() {
-    chrome.tabs.create({
-      url: chrome.runtime.getURL('relays.html')
-    });
+  function showHome() {
+    currentView = 'home';
   }
 </script>
 
 <main>
   <div class="header">
-    <h1>⚡ Nostr Contacts</h1>
+    <h1><Zap size={24} /> Nostr Contacts</h1>
   </div>
 
   {#if error}
     <div class="error">
       {error}
-      <button on:click={() => error = ''}>✕</button>
+      <button on:click={() => error = ''}><X size={18} /></button>
     </div>
   {/if}
 
@@ -245,7 +253,7 @@
         {#if userData?.profile?.picture}
           <img src={userData.profile.picture} alt="Profile" class="avatar" />
         {:else}
-          <div class="avatar-placeholder">👤</div>
+          <div class="avatar-placeholder"><User size={24} /></div>
         {/if}
         <div class="profile-details">
           <div class="name">
@@ -259,11 +267,15 @@
       <div class="actions">
         <button 
           class="btn-small" 
-          on:click={refreshUserData} 
+          on:click={refreshData} 
           disabled={isLoading}
           title="Refresh data from relays"
         >
-          🔄
+          {#if isLoading}
+            <RefreshCw size={16} class="spin" />
+          {:else}
+            <RefreshCw size={16} />
+          {/if}
         </button>
         <button 
           class="btn-small" 
@@ -271,44 +283,66 @@
           disabled={isLoading}
           title="Logout"
         >
-          🚪
+          <LogOut size={16} />
         </button>
       </div>
     </div>
 
-    <div class="stats">
-      <div 
-        class="stat stat-clickable" 
-        on:click={openContactsPage}
-        on:keydown={(e) => e.key === 'Enter' && openContactsPage()}
-        role="button"
-        tabindex="0"
-        title="Click to view all contacts"
-      >
-        <div class="stat-value">{contacts.length}</div>
-        <div class="stat-label">Contacts</div>
-      </div>
-      <div 
-        class="stat stat-clickable" 
-        on:click={openRelaysPage}
-        on:keydown={(e) => e.key === 'Enter' && openRelaysPage()}
-        role="button"
-        tabindex="0"
-        title="Click to view all relays"
-      >
-        <div class="stat-value">{userData?.relays.length || 0}</div>
-        <div class="stat-label">Relays</div>
-      </div>
-      {#if userData?.lastUpdated}
-        <div class="stat">
-          <div class="stat-value-small">{formatTimestamp(userData.lastUpdated)}</div>
-          <div class="stat-label">Last Updated</div>
+    {#if currentView === 'home'}
+      <div class="stats">
+        <div 
+          class="stat stat-clickable" 
+          on:click={showContacts}
+          on:keydown={(e) => e.key === 'Enter' && showContacts()}
+          role="button"
+          tabindex="0"
+          title="Click to view all contacts"
+        >
+          <div class="stat-value">{contacts.length}</div>
+          <div class="stat-label">Contacts</div>
         </div>
-      {/if}
-    </div>
+        <div 
+          class="stat stat-clickable" 
+          on:click={showRelays}
+          on:keydown={(e) => e.key === 'Enter' && showRelays()}
+          role="button"
+          tabindex="0"
+          title="Click to view all relays"
+        >
+          <div class="stat-value">{userData?.relays.length || 0}</div>
+          <div class="stat-label">Relays</div>
+        </div>
+        {#if userData?.lastUpdated}
+          <div class="stat">
+            <div class="stat-value-small">{new Date(userData.lastUpdated).toLocaleString()}</div>
+            <div class="stat-label">Last Updated</div>
+          </div>
+        {/if}
+      </div>
 
-    <div class="info-box">
-      <p>Click on the <strong>Contacts</strong> or <strong>Relays</strong> cards above to view them in a new tab.</p>
-    </div>
+      <div class="info-box">
+        <p>Click on the <strong>Contacts</strong> or <strong>Relays</strong> cards above to view them.</p>
+      </div>
+    {:else if currentView === 'contacts'}
+      <div class="nav-header">
+        <button class="btn-back" on:click={showHome}>
+          <ArrowLeft size={16} />
+          Back
+        </button>
+        <h2>Contacts</h2>
+        <button class="btn-back" on:click={() => window.open('https://following.space', '_blank')}>
+          Follow packs 
+          <ExternalLink size={16} />
+        </button>
+      </div>
+      <Contacts bind:this={contactsComponent} />
+    {:else if currentView === 'relays'}
+      <div class="nav-header">
+        <button class="btn-back" on:click={showHome}>← Back</button>
+        <h2>Relays</h2>
+        <div></div>
+      </div>
+      <Relays bind:this={relaysComponent} />
+    {/if}
   {/if}
 </main>

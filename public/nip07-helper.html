@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nostr Extension Helper</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .container {
+      background: white;
+      border-radius: 16px;
+      padding: 40px;
+      max-width: 600px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      text-align: center;
+    }
+
+    .icon {
+      font-size: 64px;
+      margin-bottom: 20px;
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% {
+        transform: scale(1);
+      }
+      50% {
+        transform: scale(1.05);
+      }
+    }
+
+    h1 {
+      color: #333;
+      margin-bottom: 16px;
+      font-size: 28px;
+    }
+
+    p {
+      color: #666;
+      line-height: 1.6;
+      margin-bottom: 12px;
+    }
+
+    .status {
+      margin-top: 24px;
+      padding: 16px;
+      border-radius: 8px;
+      background: #f0f4ff;
+      color: #667eea;
+      font-weight: 500;
+    }
+
+    .status.success {
+      background: #e8f5e9;
+      color: #2e7d32;
+    }
+
+    .status.error {
+      background: #ffebee;
+      color: #c62828;
+    }
+
+    .info {
+      margin-top: 24px;
+      padding: 16px;
+      background: #f5f5f5;
+      border-radius: 8px;
+      font-size: 14px;
+      color: #666;
+    }
+
+    .info strong {
+      color: #333;
+    }
+
+    .close-btn {
+      margin-top: 24px;
+      padding: 12px 24px;
+      background: #667eea;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .close-btn:hover {
+      background: #5568d3;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">🔐</div>
+    <h1>Nostr Extension Helper</h1>
+    <p>This page enables your Nostr extension to access NIP-07 signing capabilities.</p>
+    <p>Keep this tab open while using the extension's contacts or relays pages.</p>
+    
+    <div class="status" id="status">
+      Checking for NIP-07 provider...
+    </div>
+
+    <div class="info">
+      <strong>What is this?</strong><br>
+      Browser extensions cannot directly access <code>window.nostr</code> in their own pages due to security restrictions. This helper page acts as a bridge, allowing your extension to communicate with your NIP-07 signer (like Alby, nos2x, etc.).
+    </div>
+
+    <button class="close-btn" onclick="window.close()">Close This Tab</button>
+  </div>
+
+  <script>
+    // Check for NIP-07 provider
+    function checkNip07() {
+      const statusEl = document.getElementById('status');
+      
+      if (typeof window.nostr !== 'undefined') {
+        statusEl.textContent = '✓ NIP-07 provider detected and ready!';
+        statusEl.className = 'status success';
+        return true;
+      } else {
+        statusEl.textContent = '⚠ No NIP-07 provider found. Please install a Nostr extension (Alby, nos2x, etc.)';
+        statusEl.className = 'status error';
+        return false;
+      }
+    }
+
+    // Initial check
+    checkNip07();
+
+    // Recheck periodically in case the extension loads after the page
+    let checkCount = 0;
+    const intervalId = setInterval(() => {
+      if (checkNip07() || checkCount++ > 10) {
+        clearInterval(intervalId);
+      }
+    }, 1000);
+
+    // Mark this tab as a helper
+    window.isNostrExtensionHelper = true;
+    
+    console.log('Nostr Extension Helper page loaded');
+  </script>
+</body>
+</html>

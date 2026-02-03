@@ -20,6 +20,7 @@
     "vite": "^7.2.4"
   },
   "dependencies": {
+    "lucide-svelte": "^0.563.0",
     "nostr-tools": "^2.22.1"
   }
 }

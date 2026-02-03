@@ -15,8 +15,19 @@ export enum MessageType {
   FETCH_USER_DATA = 'FETCH_USER_DATA',
   FETCH_CONTACTS = 'FETCH_CONTACTS',
   REMOVE_CONTACT = 'REMOVE_CONTACT',
+  ADD_CONTACT = 'ADD_CONTACT',
   LOGOUT = 'LOGOUT',
   GET_LOGIN_STATUS = 'GET_LOGIN_STATUS',
+  
+  // Relay management (NIP-65)
+  FETCH_RELAYS = 'FETCH_RELAYS',
+  ADD_RELAY = 'ADD_RELAY',
+  REMOVE_RELAY = 'REMOVE_RELAY',
+  UPDATE_RELAY_TYPE = 'UPDATE_RELAY_TYPE',
+  PUBLISH_RELAY_LIST = 'PUBLISH_RELAY_LIST',
+  
+  // Refresh all data (profile, contacts, relays)
+  REFRESH_DATA = 'REFRESH_DATA',
 }
 
 export interface Message {

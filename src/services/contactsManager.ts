@@ -131,8 +131,16 @@ export class ContactsManager {
     // Create unsigned event
     const unsignedEvent = this.createContactListEvent(contacts);
 
+    console.log('[ContactsManager] Unsigned event created:', unsignedEvent);
+
     // Sign with NIP-07
     const signedEvent = await Nip07TabService.signEvent(unsignedEvent);
+
+    console.log('[ContactsManager] Signed event:', signedEvent);
+
+    if (!signedEvent) {
+      throw new Error('Failed to sign event. Please make sure your Nostr extension is unlocked and try again.');
+    }
 
     // Publish to relays
     await this.relayManager.publish(signedEvent as any);

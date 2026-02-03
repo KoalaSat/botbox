@@ -25,11 +25,31 @@ export interface StoredContact extends NostrContact {
   profile?: NostrProfile;
 }
 
+// NIP-11 Relay Information Document
+export interface RelayInfo {
+  name?: string;
+  description?: string;
+  pubkey?: string;
+  contact?: string;
+  supported_nips?: number[];
+  software?: string;
+  version?: string;
+  icon?: string;
+}
+
+// NIP-65 Relay metadata
+export interface RelayMetadata {
+  url: string;
+  type: 'read' | 'write' | 'both'; // both = no marker in NIP-65
+  info?: RelayInfo; // NIP-11 relay information
+}
+
 export interface UserData {
   pubkey: string;
   profile?: NostrProfile;
   contacts: NostrContact[];
-  relays: string[];
+  relays: string[]; // Legacy simple relay list
+  relayMetadata?: RelayMetadata[]; // NIP-65 relay list with read/write markers
   lastUpdated: number;
 }
 
@@ -78,7 +98,7 @@ export class Database {
   }
 
   /**
-   * Update user relays
+   * Update user relays (legacy)
    */
   static async updateUserRelays(relays: string[]): Promise<void> {
     const userData = await this.getUserData();
@@ -86,6 +106,28 @@ export class Database {
       userData.relays = relays;
       await this.setUserData(userData);
     }
+  }
+
+  /**
+   * Update user relay metadata (NIP-65)
+   */
+  static async updateUserRelayMetadata(relayMetadata: RelayMetadata[]): Promise<void> {
+    const userData = await this.getUserData();
+    if (userData) {
+      userData.relayMetadata = relayMetadata;
+      // Also update legacy relays list for backwards compatibility
+      userData.relays = relayMetadata.map(r => r.url);
+      userData.lastUpdated = Date.now();
+      await this.setUserData(userData);
+    }
+  }
+
+  /**
+   * Get user relay metadata (NIP-65)
+   */
+  static async getUserRelayMetadata(): Promise<RelayMetadata[]> {
+    const userData = await this.getUserData();
+    return userData?.relayMetadata || [];
   }
 
   /**

@@ -176,15 +176,38 @@ export class RelayManager {
    */
   async publish(event: NostrEvent): Promise<void> {
     console.log(`[RelayManager] Publishing event to ${this.relays.length} relays...`);
+    console.log(`[RelayManager] Event kind: ${event.kind}, id: ${event.id}`);
+    console.log(`[RelayManager] Relays:`, this.relays);
+    
     try {
       const publishPromises = this.pool.publish(this.relays, event);
       
-      // Wait for at least one relay to accept the event
-      await Promise.any(publishPromises);
-      console.log('[RelayManager] Event published successfully to at least one relay');
+      // Track individual relay results
+      const results = await Promise.allSettled(publishPromises);
+      
+      let successCount = 0;
+      let failureReasons: string[] = [];
+      
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          console.log(`[RelayManager] ✓ Published to ${this.relays[index]}`);
+          successCount++;
+        } else {
+          const reason = result.reason?.message || result.reason || 'Unknown error';
+          console.error(`[RelayManager] ✗ Failed to publish to ${this.relays[index]}:`, reason);
+          failureReasons.push(`${this.relays[index]}: ${reason}`);
+        }
+      });
+      
+      if (successCount === 0) {
+        console.error('[RelayManager] All relays rejected the event:', failureReasons);
+        throw new Error(`Failed to publish event to any relay (0/${this.relays.length} succeeded). Errors:\n${failureReasons.join('\n')}`);
+      }
+      
+      console.log(`[RelayManager] Event published successfully to ${successCount}/${this.relays.length} relay(s)`);
     } catch (error) {
-      console.error('[RelayManager] Failed to publish event to any relay:', error);
-      throw new Error('Failed to publish event to any relay. Please check your network connection and try again.');
+      console.error('[RelayManager] Failed to publish event:', error);
+      throw error;
     }
   }
 
