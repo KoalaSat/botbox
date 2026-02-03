@@ -194,23 +194,33 @@ export class ConsistencyRelayService {
   /**
    * Handle incoming event
    */
-  private handleEvent(event: NostrEvent): void {
-    // Add event if it doesn't exist
-    if (!this.events.find((e) => e.id === event.id)) {
-      this.events = [event, ...this.events];
-      
-      // Keep only last N events in memory
-      if (this.events.length > this.MAX_EVENTS_IN_MEMORY) {
-        this.events = this.events.slice(0, this.MAX_EVENTS_IN_MEMORY);
-      }
-      
-      console.log('[ConsistencyRelay] New event received:', event.kind);
-
-      // Broadcast event to outbox and inbox relays
-      this.broadcastEvent(event).catch((error) => {
-        console.error('[ConsistencyRelay] Failed to broadcast event:', error);
-      });
+  private async handleEvent(event: NostrEvent): Promise<void> {
+    // Skip if event already exists
+    if (this.events.find((e) => e.id === event.id)) {
+      return;
     }
+
+    // Skip follow list events (kind 3) from other users - they are not relevant
+    const userData = await Database.getUserData();
+    if (userData && event.kind === 3 && event.pubkey !== userData.pubkey) {
+      console.log('[ConsistencyRelay] Skipping follow list event from other user');
+      return;
+    }
+
+    // Add event to memory
+    this.events = [event, ...this.events];
+    
+    // Keep only last N events in memory
+    if (this.events.length > this.MAX_EVENTS_IN_MEMORY) {
+      this.events = this.events.slice(0, this.MAX_EVENTS_IN_MEMORY);
+    }
+    
+    console.log('[ConsistencyRelay] New event received:', event.kind);
+
+    // Broadcast event to outbox and inbox relays
+    this.broadcastEvent(event).catch((error) => {
+      console.error('[ConsistencyRelay] Failed to broadcast event:', error);
+    });
   }
 
   /**
