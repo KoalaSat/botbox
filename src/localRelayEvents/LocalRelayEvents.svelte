@@ -1,17 +1,17 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
-  import { X, RefreshCw, Trash2, ChevronDown, ChevronUp } from "lucide-svelte";
-  import { formatPubkey } from "../shared/formatters";
-  import { Database } from "../services/db";
-  import { sendToBackground, MessageType } from "../shared/messaging";
-  import { nip19, type Event as NostrEvent } from "nostr-tools";
-  import "./localRelayEvents.css";
+  import { onMount, onDestroy } from 'svelte';
+  import { X, RefreshCw, Trash2, ChevronDown, ChevronUp } from 'lucide-svelte';
+  import { formatPubkey } from '../shared/formatters';
+  import { Database } from '../services/db';
+  import { sendToBackground, MessageType } from '../shared/messaging';
+  import { nip19, type Event as NostrEvent } from 'nostr-tools';
+  import './localRelayEvents.css';
 
   let events: NostrEvent[] = [];
   let filteredEvents: NostrEvent[] = [];
   let isLoading = false;
-  let error = "";
-  let searchTerm = "";
+  let error = '';
+  let searchTerm = '';
   let selectedKinds: number[] = [];
   let expandedEventId: string | null = null;
   let isConnected = false;
@@ -23,7 +23,7 @@
     await loadUserData();
     await loadRelayUrl();
     await fetchEvents();
-
+    
     // Poll for new events every 2 seconds
     pollInterval = window.setInterval(fetchEvents, 2000);
   });
@@ -63,14 +63,14 @@
 
       if (response.success) {
         events = response.data || [];
-        error = "";
+        error = '';
         updateFilteredEvents();
       } else {
-        throw new Error(response.error || "Failed to fetch events");
+        throw new Error(response.error || 'Failed to fetch events');
       }
     } catch (err) {
-      console.error("Error fetching events:", err);
-      error = err instanceof Error ? err.message : "Failed to fetch events";
+      console.error('Error fetching events:', err);
+      error = err instanceof Error ? err.message : 'Failed to fetch events';
       isConnected = false;
     } finally {
       isLoading = false;
@@ -78,14 +78,14 @@
   }
 
   function updateFilteredEvents() {
-    filteredEvents = events.filter((event) => {
+    filteredEvents = events.filter(event => {
       // Filter by search term
       if (searchTerm) {
         const term = searchTerm.toLowerCase();
         const matchesId = event.id.toLowerCase().includes(term);
         const matchesPubkey = event.pubkey.toLowerCase().includes(term);
         const matchesContent = event.content.toLowerCase().includes(term);
-
+        
         if (!matchesId && !matchesPubkey && !matchesContent) {
           return false;
         }
@@ -102,25 +102,56 @@
 
   function getKindLabel(kind: number): string {
     const kindLabels: Record<number, string> = {
-      0: "Profile",
-      1: "Note",
-      3: "Contacts",
-      4: "Encrypted DM",
-      5: "Event Deletion",
-      6: "Repost",
-      7: "Reaction",
-      10002: "Relay List",
-      30023: "Long-form",
+      0: 'Profile',
+      1: 'Note',
+      3: 'Contacts',
+      4: 'Encrypted DM',
+      5: 'Event Deletion',
+      6: 'Repost',
+      7: 'Reaction',
+      10002: 'Relay List',
+      30023: 'Long-form',
     };
     return kindLabels[kind] || `Kind ${kind}`;
+  }
+
+  function getUniqueKinds(): number[] {
+    const kinds = new Set(events.map(e => e.kind));
+    return Array.from(kinds).sort((a, b) => a - b);
+  }
+
+  function toggleKindFilter(kind: number) {
+    if (selectedKinds.includes(kind)) {
+      selectedKinds = selectedKinds.filter(k => k !== kind);
+    } else {
+      selectedKinds = [...selectedKinds, kind];
+    }
+    updateFilteredEvents();
   }
 
   function formatTimestamp(timestamp: number): string {
     return new Date(timestamp * 1000).toLocaleString();
   }
 
+  function formatNpub(pubkey: string): string {
+    try {
+      return nip19.npubEncode(pubkey);
+    } catch {
+      return formatPubkey(pubkey);
+    }
+  }
+
   function toggleEventExpansion(eventId: string) {
     expandedEventId = expandedEventId === eventId ? null : eventId;
+  }
+
+  function copyToClipboard(text: string) {
+    navigator.clipboard.writeText(text);
+  }
+
+  async function refreshEvents() {
+    isLoading = true;
+    await fetchEvents();
   }
 
   $: {
@@ -134,16 +165,56 @@
   {#if error}
     <div class="error">
       {error}
-      <button on:click={() => (error = "")}><X size={18} /></button>
+      <button on:click={() => error = ''}><X size={18} /></button>
     </div>
   {/if}
+
   <div class="page-container">
-    <input
-      type="text"
-      class="search-input"
-      placeholder="Search events..."
-      bind:value={searchTerm}
-    />
+    <div class="page-header">
+      <div class="connection-status">
+        <span class="status-indicator" class:connected={isConnected} class:disconnected={!isConnected}></span>
+        <span class="status-text">
+          {isConnected ? 'Connected' : 'Disconnected'}
+        </span>
+      </div>
+      <button
+        class="btn-primary"
+        on:click={refreshEvents}
+        disabled={isLoading}
+        title="Refresh events"
+      >
+        {#if isLoading}
+          <RefreshCw size={16} class="spin" /> Loading...
+        {:else}
+          <RefreshCw size={16} /> Refresh
+        {/if}
+      </button>
+    </div>
+
+    <div class="filters">
+      <input
+        type="text"
+        class="search-input"
+        placeholder="Search events..."
+        bind:value={searchTerm}
+      />
+      
+      {#if getUniqueKinds().length > 0}
+        <div class="kind-filters">
+          <span class="filter-label">Filter by kind:</span>
+          {#each getUniqueKinds() as kind}
+            <button
+              class="kind-filter-btn"
+              class:active={selectedKinds.includes(kind)}
+              on:click={() => toggleKindFilter(kind)}
+            >
+              {getKindLabel(kind)} ({events.filter(e => e.kind === kind).length})
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </div>
+
     <div class="stats-bar">
       <div class="stat-item">
         <strong>{events.length}</strong> total events
@@ -157,8 +228,7 @@
       <div class="loading">Loading events...</div>
     {:else if events.length === 0}
       <div class="empty">
-        No events received yet. Events will appear here when sent to the
-        consistency relay.
+        No events received yet. Events will appear here when sent to the consistency relay.
       </div>
     {:else if filteredEvents.length === 0}
       <div class="empty">No events match your filters</div>
@@ -166,19 +236,16 @@
       <div class="item-list">
         {#each filteredEvents as event (event.id)}
           <div class="event-item">
-            <div
-              class="event-header"
+            <div 
+              class="event-header" 
               on:click={() => toggleEventExpansion(event.id)}
-              on:keydown={(e) =>
-                e.key === "Enter" && toggleEventExpansion(event.id)}
+              on:keydown={(e) => e.key === 'Enter' && toggleEventExpansion(event.id)}
               role="button"
               tabindex="0"
             >
               <div class="event-meta">
                 <span class="event-kind">{getKindLabel(event.kind)}</span>
-                <span class="event-time"
-                  >{formatTimestamp(event.created_at)}</span
-                >
+                <span class="event-time">{formatTimestamp(event.created_at)}</span>
               </div>
               <button class="expand-btn">
                 {#if expandedEventId === event.id}
@@ -188,7 +255,7 @@
                 {/if}
               </button>
             </div>
-
+            
             <div class="event-body">
               {#if event.content}
                 <div class="event-field">
@@ -199,7 +266,7 @@
                   </span>
                 </div>
               {/if}
-
+              
               {#if expandedEventId === event.id}
                 <div class="event-details">
                   <div class="event-field">
@@ -208,7 +275,7 @@
                       {event.id}
                     </span>
                   </div>
-
+                  
                   {#if event.tags.length > 0}
                     <div class="event-field">
                       <span class="field-label">Tags:</span>
@@ -219,14 +286,10 @@
                       </div>
                     </div>
                   {/if}
-
+                  
                   <div class="event-field">
                     <span class="field-label">Full Event JSON:</span>
-                    <pre class="json-display">{JSON.stringify(
-                        event,
-                        null,
-                        2,
-                      )}</pre>
+                    <pre class="json-display">{JSON.stringify(event, null, 2)}</pre>
                   </div>
                 </div>
               {/if}

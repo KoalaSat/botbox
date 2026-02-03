@@ -11,6 +11,24 @@
   border: 1px solid var(--border-color);
 }
 
+.status-indicator {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--error-color);
+  animation: pulse 2s infinite;
+}
+
+.status-indicator.connected {
+  background: #10b981;
+  animation: none;
+}
+
+.status-indicator.disconnected {
+  background: #b91310;
+  animation: none;
+}
+
 @keyframes pulse {
   0%, 100% {
     opacity: 1;
