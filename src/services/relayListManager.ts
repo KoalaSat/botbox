@@ -14,72 +14,184 @@ export class RelayListManager {
   }
 
   /**
-   * Fetch user's relay list (kind 10002) from relays
-   * Returns local data immediately if available, then optionally refreshes from network
+   * Fetch relay list (kind 10002) for any pubkey from relays
+   * For the logged-in user, returns local data immediately if available
+   * For other pubkeys (contacts), checks cache or fetches from network
    */
-  async fetchRelayList(pubkey: string, skipNetworkFetch: boolean = false): Promise<RelayMetadata[]> {
+  async fetchRelayList(pubkey: string): Promise<RelayMetadata[]> {
     try {
-      console.log('[RelayListManager] Fetching relay list for', pubkey);
+      console.log('[RelayListManager] Fetching relay list for', pubkey.substring(0, 8));
 
-      // First check if we have local relay metadata - return immediately
-      const localRelayMetadata = await Database.getUserRelayMetadata();
-      
-      if (localRelayMetadata.length > 0) {
-        console.log('[RelayListManager] Returning local relay metadata immediately');
+      // Check if this is the logged-in user
+      const userData = await Database.getUserData();
+      const isLoggedInUser = userData && userData.pubkey === pubkey;
+
+      if (isLoggedInUser) {
+        // For logged-in user, use existing logic with local database
+        const localRelayMetadata = await Database.getUserRelayMetadata();
         
-        // If we want to skip network fetch, return now
-        if (skipNetworkFetch) {
+        if (localRelayMetadata.length > 0) {
+          console.log('[RelayListManager] Returning user\'s local relay metadata');
+        
+          
+          // Refresh from network in background
+          this.refreshRelayListFromNetwork(pubkey).catch(err => {
+            console.error('[RelayListManager] Background refresh failed:', err);
+          });
+          
           return localRelayMetadata;
         }
         
-        // Otherwise, refresh from network in background (but return local data now)
-        this.refreshRelayListFromNetwork(pubkey).catch(err => {
-          console.error('[RelayListManager] Background refresh failed:', err);
-        });
+        // No local data - must fetch from network (first time)
+        console.log('[RelayListManager] No local data, fetching from network...');
+        const events = await this.relayManager.fetchEvents([
+          {
+            kinds: [10002],
+            authors: [pubkey],
+            limit: 1,
+          },
+        ], 3000);
+
+        if (events.length === 0) {
+          console.log('[RelayListManager] No relay list found on relays');
+          const defaults = this.getDefaultRelayMetadata();
+          await Database.updateUserRelayMetadata(defaults);
+          return defaults;
+        }
+
+        const relayList = this.parseRelayListEvent(events[0]);
+        console.log('[RelayListManager] Fetched relay list from Nostr:', relayList);
+        await Database.updateUserRelayMetadata(relayList);
+        return relayList;
+      } else {
+        // For other pubkeys (contacts), check cache or fetch from network
+        const cachedRelayList = await this.getContactRelayListFromCache(pubkey);
         
-        return localRelayMetadata;
+        if (cachedRelayList && cachedRelayList.length > 0) {
+          console.log('[RelayListManager] Returning cached relay list for contact');
+          
+          // Refresh cache in background
+          this.refreshContactRelayListCache(pubkey).catch(err => {
+            console.error('[RelayListManager] Background cache refresh failed:', err);
+          });
+          
+          return cachedRelayList;
+        }
+        
+        console.log('[RelayListManager] No cache, fetching contact relay list from network...');
+        const events = await this.relayManager.fetchEvents([
+          {
+            kinds: [10002],
+            authors: [pubkey],
+            limit: 1,
+          },
+        ], 3000);
+
+        if (events.length === 0) {
+          console.log('[RelayListManager] No relay list found for contact');
+          return [];
+        }
+
+        const relayList = this.parseRelayListEvent(events[0]);
+        console.log('[RelayListManager] Fetched contact relay list:', relayList.length, 'relays');
+        
+        // Cache it
+        await this.saveContactRelayListToCache(pubkey, relayList);
+        
+        return relayList;
+      }
+    } catch (error) {
+      console.error('[RelayListManager] Error fetching relay list:', error);
+      
+      // Check if this is the logged-in user
+      const userData = await Database.getUserData();
+      const isLoggedInUser = userData && userData.pubkey === pubkey;
+      
+      if (isLoggedInUser) {
+        const localRelayMetadata = await Database.getUserRelayMetadata();
+        if (localRelayMetadata.length > 0) {
+          console.log('[RelayListManager] Returning local relay metadata after error');
+          return localRelayMetadata;
+        }
+        
+        const defaults = this.getDefaultRelayMetadata();
+        await Database.updateUserRelayMetadata(defaults);
+        return defaults;
+      } else {
+        // For contacts, return cached data or empty
+        const cachedRelayList = await this.getContactRelayListFromCache(pubkey);
+        return cachedRelayList || [];
+      }
+    }
+  }
+
+  /**
+   * Get contact's relay list from cache
+   */
+  private async getContactRelayListFromCache(pubkey: string): Promise<RelayMetadata[] | null> {
+    try {
+      const result = await chrome.storage.local.get(`relayList_${pubkey}`);
+      const cached = result[`relayList_${pubkey}`];
+      
+      if (!cached) {
+        return null;
       }
       
-      // No local data - must fetch from network (first time)
-      console.log('[RelayListManager] No local data, fetching from network...');
+      // Check if cache is still valid (24 hours)
+      const now = Date.now();
+      if (now - cached.timestamp > 24 * 60 * 60 * 1000) {
+        console.log('[RelayListManager] Cache expired for', pubkey.substring(0, 8));
+        return null;
+      }
+      
+      return cached.relayList;
+    } catch (error) {
+      console.error('[RelayListManager] Error reading cache:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Save contact's relay list to cache
+   */
+  private async saveContactRelayListToCache(pubkey: string, relayList: RelayMetadata[]): Promise<void> {
+    try {
+      await chrome.storage.local.set({
+        [`relayList_${pubkey}`]: {
+          relayList,
+          timestamp: Date.now(),
+        }
+      });
+    } catch (error) {
+      console.error('[RelayListManager] Error saving to cache:', error);
+    }
+  }
+
+  /**
+   * Refresh contact's relay list cache in background
+   */
+  private async refreshContactRelayListCache(pubkey: string): Promise<void> {
+    try {
+      console.log('[RelayListManager] Background refresh for contact', pubkey.substring(0, 8));
+      
       const events = await this.relayManager.fetchEvents([
         {
           kinds: [10002],
           authors: [pubkey],
           limit: 1,
         },
-      ], 3000); // 3 second timeout
+      ], 3000);
 
       if (events.length === 0) {
-        console.log('[RelayListManager] No relay list found on relays');
-        console.log('[RelayListManager] Using default relays');
-        const defaults = this.getDefaultRelayMetadata();
-        await Database.updateUserRelayMetadata(defaults);
-        return defaults;
+        console.log('[RelayListManager] No new relay list data for contact');
+        return;
       }
 
-      // Parse the relay list from the event
       const relayList = this.parseRelayListEvent(events[0]);
-      console.log('[RelayListManager] Fetched relay list from Nostr:', relayList);
-
-      // Save to database
-      await Database.updateUserRelayMetadata(relayList);
-
-      return relayList;
+      await this.saveContactRelayListToCache(pubkey, relayList);
+      console.log('[RelayListManager] Updated cache for contact');
     } catch (error) {
-      console.error('[RelayListManager] Error fetching relay list:', error);
-      
-      // Try to return local data first
-      const localRelayMetadata = await Database.getUserRelayMetadata();
-      if (localRelayMetadata.length > 0) {
-        console.log('[RelayListManager] Returning local relay metadata after error');
-        return localRelayMetadata;
-      }
-      
-      // Fallback to defaults
-      const defaults = this.getDefaultRelayMetadata();
-      await Database.updateUserRelayMetadata(defaults);
-      return defaults;
+      console.error('[RelayListManager] Background cache refresh error:', error);
     }
   }
 

@@ -97,7 +97,7 @@
       }
 
       return true;
-    });
+    }).sort((a, b) => b.created_at - a.created_at);
   }
 
   function getKindLabel(kind: number): string {
@@ -115,43 +115,12 @@
     return kindLabels[kind] || `Kind ${kind}`;
   }
 
-  function getUniqueKinds(): number[] {
-    const kinds = new Set(events.map(e => e.kind));
-    return Array.from(kinds).sort((a, b) => a - b);
-  }
-
-  function toggleKindFilter(kind: number) {
-    if (selectedKinds.includes(kind)) {
-      selectedKinds = selectedKinds.filter(k => k !== kind);
-    } else {
-      selectedKinds = [...selectedKinds, kind];
-    }
-    updateFilteredEvents();
-  }
-
   function formatTimestamp(timestamp: number): string {
     return new Date(timestamp * 1000).toLocaleString();
   }
 
-  function formatNpub(pubkey: string): string {
-    try {
-      return nip19.npubEncode(pubkey);
-    } catch {
-      return formatPubkey(pubkey);
-    }
-  }
-
   function toggleEventExpansion(eventId: string) {
     expandedEventId = expandedEventId === eventId ? null : eventId;
-  }
-
-  function copyToClipboard(text: string) {
-    navigator.clipboard.writeText(text);
-  }
-
-  async function refreshEvents() {
-    isLoading = true;
-    await fetchEvents();
   }
 
   $: {
@@ -171,50 +140,19 @@
 
   <div class="page-container">
     <div class="page-header">
-      <div class="connection-status">
-        <span class="status-indicator" class:connected={isConnected} class:disconnected={!isConnected}></span>
-        <span class="status-text">
-          {isConnected ? 'Connected' : 'Disconnected'}
-        </span>
-      </div>
-      <button
-        class="btn-primary"
-        on:click={refreshEvents}
-        disabled={isLoading}
-        title="Refresh events"
-      >
-        {#if isLoading}
-          <RefreshCw size={16} class="spin" /> Loading...
-        {:else}
-          <RefreshCw size={16} /> Refresh
-        {/if}
-      </button>
-    </div>
-
-    <div class="filters">
       <input
         type="text"
         class="search-input"
         placeholder="Search events..."
         bind:value={searchTerm}
       />
-      
-      {#if getUniqueKinds().length > 0}
-        <div class="kind-filters">
-          <span class="filter-label">Filter by kind:</span>
-          {#each getUniqueKinds() as kind}
-            <button
-              class="kind-filter-btn"
-              class:active={selectedKinds.includes(kind)}
-              on:click={() => toggleKindFilter(kind)}
-            >
-              {getKindLabel(kind)} ({events.filter(e => e.kind === kind).length})
-            </button>
-          {/each}
-        </div>
-      {/if}
+      <div class="connection-status">
+        <span class="status-indicator" class:connected={isConnected} class:disconnected={!isConnected}></span>
+        <span class="status-text">
+          {isConnected ? 'Connected' : 'Disconnected'}
+        </span>
+      </div>
     </div>
-
     <div class="stats-bar">
       <div class="stat-item">
         <strong>{events.length}</strong> total events
