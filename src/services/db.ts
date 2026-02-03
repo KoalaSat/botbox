@@ -56,6 +56,7 @@ export interface UserData {
 const STORAGE_KEYS = {
   USER_DATA: 'userData',
   CONTACT_PROFILES: 'contactProfiles',
+  APP_RELAY_URL: 'appRelayUrl',
 } as const;
 
 export class Database {
@@ -196,5 +197,27 @@ export class Database {
   static async isLoggedIn(): Promise<boolean> {
     const userData = await this.getUserData();
     return userData !== null && !!userData.pubkey;
+  }
+
+  /**
+   * Get app relay URL
+   */
+  static async getAppRelayUrl(): Promise<string | null> {
+    const result = await chrome.storage.local.get(STORAGE_KEYS.APP_RELAY_URL);
+    return result[STORAGE_KEYS.APP_RELAY_URL] || null;
+  }
+
+  /**
+   * Set app relay URL
+   */
+  static async setAppRelayUrl(url: string): Promise<void> {
+    await chrome.storage.local.set({ [STORAGE_KEYS.APP_RELAY_URL]: url });
+  }
+
+  /**
+   * Clear app relay URL
+   */
+  static async clearAppRelayUrl(): Promise<void> {
+    await chrome.storage.local.remove(STORAGE_KEYS.APP_RELAY_URL);
   }
 }

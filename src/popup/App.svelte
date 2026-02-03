@@ -3,8 +3,11 @@
   import { sendToBackground } from '../shared/messaging';
   import { MessageType } from '../shared/messaging';
   import type { UserData, StoredContact } from '../services/db';
+  import { Database } from '../services/db';
   import Contacts from '../contacts/Contacts.svelte';
   import Relays from '../relays/Relays.svelte';
+  import LocalRelayEvents from '../localRelayEvents/LocalRelayEvents.svelte';
+  import AppRelaySettings from '../appRelaySettings/AppRelaySettings.svelte';
   import { Zap, User, RefreshCw, LogOut, X, ExternalLink, ArrowLeft } from 'lucide-svelte';
   import { formatPubkey } from '../shared/formatters';
 
@@ -14,9 +17,11 @@
   let userData: UserData | null = null;
   let contacts: StoredContact[] = [];
   let isFetchingContacts = false;
-  let currentView: 'home' | 'contacts' | 'relays' = 'home';
+  let currentView: 'home' | 'contacts' | 'relays' | 'localRelayEvents' | 'appRelaySettings' = 'home';
   let contactsComponent: Contacts;
   let relaysComponent: Relays;
+  let localRelayEventsComponent: LocalRelayEvents;
+  let appRelayUrl: string | null = null;
 
   /**
    * Handle storage changes - refresh data when updated
@@ -41,6 +46,9 @@
       }
     });
     
+    // Load app relay URL
+    loadAppRelayUrl();
+    
     // Listen for storage changes to auto-refresh data
     chrome.storage.onChanged.addListener(handleStorageChange);
     
@@ -49,6 +57,10 @@
       chrome.storage.onChanged.removeListener(handleStorageChange);
     };
   });
+
+  async function loadAppRelayUrl() {
+    appRelayUrl = await Database.getAppRelayUrl();
+  }
 
   async function checkLoginStatus() {
     try {
@@ -214,8 +226,28 @@
     currentView = 'relays';
   }
 
+  function showLocalRelayEvents() {
+    currentView = 'localRelayEvents';
+  }
+
+  function showAppRelaySettings() {
+    currentView = 'appRelaySettings';
+  }
+
+  async function handleAppRelayBoxClick() {
+    if (appRelayUrl) {
+      // If configured, show events
+      showLocalRelayEvents();
+    } else {
+      // If not configured, show settings
+      showAppRelaySettings();
+    }
+  }
+
   function showHome() {
     currentView = 'home';
+    // Reload app relay URL when returning home
+    loadAppRelayUrl();
   }
 </script>
 
@@ -320,8 +352,34 @@
         {/if}
       </div>
 
-      <div class="info-box">
-        <p>Click on the <strong>Contacts</strong> or <strong>Relays</strong> cards above to view them.</p>
+      <div 
+        class="info-box info-box-clickable"
+        on:click={handleAppRelayBoxClick}
+        on:keydown={(e) => e.key === 'Enter' && handleAppRelayBoxClick()}
+        role="button"
+        tabindex="0"
+        title={appRelayUrl ? 'Click to view relay events' : 'Click to configure app relay'}
+      >
+        <div class="relay-info">
+          <div class="relay-header">
+            <Zap size={16} />
+            <strong>App Relay</strong>
+          </div>
+          {#if appRelayUrl}
+            <div class="relay-details">
+              <div class="relay-url">
+                <code>{appRelayUrl}</code>
+              </div>
+            </div>
+            <p class="relay-description">
+              Click to view your events from this relay.
+            </p>
+          {:else}
+            <p class="relay-description">
+              Not configured. Click to set up your app relay.
+            </p>
+          {/if}
+        </div>
       </div>
     {:else if currentView === 'contacts'}
       <div class="nav-header">
@@ -338,11 +396,36 @@
       <Contacts bind:this={contactsComponent} />
     {:else if currentView === 'relays'}
       <div class="nav-header">
-        <button class="btn-back" on:click={showHome}>← Back</button>
+        <button class="btn-back" on:click={showHome}>
+          <ArrowLeft size={16} />
+          Back
+        </button>
         <h2>Relays</h2>
         <div></div>
       </div>
       <Relays bind:this={relaysComponent} />
+    {:else if currentView === 'localRelayEvents'}
+      <div class="nav-header">
+        <button class="btn-back" on:click={showHome}>
+          <ArrowLeft size={16} />
+          Back
+        </button>
+        <h2>App Relay Events</h2>
+        <button class="btn-back" on:click={showAppRelaySettings}>
+          Settings
+        </button>
+      </div>
+      <LocalRelayEvents bind:this={localRelayEventsComponent} />
+    {:else if currentView === 'appRelaySettings'}
+      <div class="nav-header">
+        <button class="btn-back" on:click={showHome}>
+          <ArrowLeft size={16} />
+          Back
+        </button>
+        <h2>App Relay</h2>
+        <div></div>
+      </div>
+      <AppRelaySettings />
     {/if}
   {/if}
 </main>

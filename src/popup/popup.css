@@ -86,6 +86,23 @@
   color: var(--info-text);
   font-size: 14px;
   line-height: 1.6;
+  transition: all 0.2s;
+}
+
+.info-box-clickable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.info-box-clickable:hover {
+  background: white;
+  border-color: var(--primary-color);
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.15);
+  transform: translateY(-2px);
+}
+
+.info-box-clickable:active {
+  transform: translateY(0);
 }
 
 /* Navigation header - only used in popup */
