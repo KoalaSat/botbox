@@ -321,6 +321,9 @@ async function handleNip07Login(payload: {
 
   await Database.setUserData(userData);
 
+  // Ensure first login timestamp is set (only happens once)
+  await Database.ensureFirstLoginTimestamp();
+
   // Fetch user profile and contacts in background
   fetchUserDataInBackground(pubkey);
 

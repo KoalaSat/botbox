@@ -1,7 +1,11 @@
 /**
  * Consistency Relay Service
- * Manages WebSocket connection to a consistency relay and broadcasts events
- * to user's outbox relays and tagged users' inbox relays
+ * Manages WebSocket connection to a consistency relay and monitors:
+ * 1. Events authored by the user - broadcasts to user's outbox and tagged users' inbox relays
+ * 2. Events where the user is tagged - broadcasts to user's inbox relays
+ * 
+ * Special handling for Profile (kind 0) and Relay List (kind 10002) events:
+ * broadcasts to all read relays of contacts in the user's follow list
  */
 
 import type { Event as NostrEvent } from 'nostr-tools';
@@ -70,11 +74,19 @@ export class ConsistencyRelayService {
           this.ws = ws;
           this.reconnectAttempts = 0;
 
-          // Subscribe to user's events
-          const subscriptionId = 'consistency-relay-' + Date.now();
+          // Subscribe to user's events (authored by user)
+          const subscriptionId = 'consistency-relay-authored-' + Date.now();
           const filter = { authors: [pubkey] };
           const req = JSON.stringify(['REQ', subscriptionId, filter]);
           ws.send(req);
+
+          // Subscribe to events where user is tagged
+          const taggedSubscriptionId = 'consistency-relay-tagged-' + Date.now();
+          const taggedFilter = { '#p': [pubkey] };
+          const taggedReq = JSON.stringify(['REQ', taggedSubscriptionId, taggedFilter]);
+          ws.send(taggedReq);
+
+          console.log('[ConsistencyRelay] Subscribed to authored events and tagged events');
 
           resolve();
         };
@@ -116,6 +128,8 @@ export class ConsistencyRelayService {
     }
     this.url = null;
     this.reconnectAttempts = this.MAX_RECONNECT_ATTEMPTS; // Prevent auto-reconnect
+    // Clear in-memory events
+    this.events = [];
   }
 
   /**
@@ -224,26 +238,44 @@ export class ConsistencyRelayService {
 
       let allTargetRelays: string[] = [];
 
-      // Special handling for Profile (kind 0) and Relay List (kind 10002) events
-      if (event.kind === 0 || event.kind === 10002) {
+      // Check if this event has already been broadcast
+      const alreadyBroadcast = await this.hasBeenBroadcast(event.id);
+      if (alreadyBroadcast) {
+        console.log('[ConsistencyRelay] Event', event.id.substring(0, 8), 'already broadcast, skipping');
+        return;
+      }
+
+      // Check if event was created before user's first login (don't broadcast old events)
+      const firstLoginTimestamp = await Database.getFirstLoginTimestamp();
+      if (firstLoginTimestamp && event.created_at < firstLoginTimestamp) {
+        console.log(
+          '[ConsistencyRelay] Event created before first login (',
+          event.created_at,
+          '<',
+          firstLoginTimestamp,
+          '), skipping broadcast'
+        );
+        return;
+      }
+
+      // Check if user is the author of this event
+      const isUserAuthor = event.pubkey === userData.pubkey;
+
+      // Check if user is tagged in this event
+      const taggedPubkeys = this.extractTaggedPubkeys(event);
+      const isUserTagged = taggedPubkeys.includes(userData.pubkey);
+
+      if (!isUserAuthor && isUserTagged) {
+        // Event where user is tagged (but not authored by user)
+        // Broadcast to user's read relays (inbox)
+        console.log('[ConsistencyRelay] User is tagged in event, broadcasting to inbox relays');
+        const inboxRelays = await relayListManager.getReadRelays();
+        console.log('[ConsistencyRelay] User inbox relays:', inboxRelays.length);
+        allTargetRelays = inboxRelays;
+      } else if (isUserAuthor && (event.kind === 0 || event.kind === 10002)) {
+        // Special handling for Profile (kind 0) and Relay List (kind 10002) events
+        // authored by the user
         console.log('[ConsistencyRelay] Special handling for Profile/Relay List event');
-        
-        // Check if we have a previous record of this event type
-        const hasPreyiousRecord = await this.hasPreviousEventRecord(event.kind);
-        
-        if (!hasPreyiousRecord) {
-          // First time seeing this event type - just store it, don't broadcast
-          console.log('[ConsistencyRelay] First time seeing kind', event.kind, '- storing without broadcast');
-          await this.storeEventTimestamp(event);
-          return;
-        }
-        
-        // Check if this event is newer than the last one we broadcast
-        const isNewEvent = await this.isNewerEvent(event);
-        if (!isNewEvent) {
-          console.log('[ConsistencyRelay] Event is not newer than previously seen, skipping broadcast');
-          return;
-        }
         
         // Get all contacts from user's follow list
         const contacts = userData.contacts || [];
@@ -265,17 +297,14 @@ export class ConsistencyRelayService {
           // Combine and deduplicate
           allTargetRelays = [...new Set([...outboxRelays, ...contactsReadRelays])];
         }
+      } else if (isUserAuthor) {
+        // Normal broadcasting for user-authored events: user's outbox + tagged users' inbox relays
+        console.log('[ConsistencyRelay] Broadcasting user-authored event');
         
-        // Store this event's timestamp for future comparison
-        await this.storeEventTimestamp(event);
-      } else {
-        // Normal broadcasting: user's outbox + tagged users' inbox relays
         // Get user's outbox relays (write relays)
         const outboxRelays = await relayListManager.getWriteRelays();
-        console.log('[ConsistencyRelay] User outbox relays:', outboxRelays);
+        console.log('[ConsistencyRelay] User outbox relays:', outboxRelays.length);
 
-        // Extract tagged pubkeys
-        const taggedPubkeys = this.extractTaggedPubkeys(event);
         console.log('[ConsistencyRelay] Tagged pubkeys:', taggedPubkeys.length);
 
         // Collect inbox relays for tagged pubkeys
@@ -284,6 +313,9 @@ export class ConsistencyRelayService {
 
         // Combine and deduplicate all target relays
         allTargetRelays = [...new Set([...outboxRelays, ...inboxRelays])];
+      } else {
+        console.log('[ConsistencyRelay] Event not relevant to user (not authored by or tagging user)');
+        return;
       }
 
       // Exclude the consistency relay itself
@@ -343,8 +375,8 @@ export class ConsistencyRelayService {
     // Then, try to fetch relay lists (kind 10002) for all contacts in parallel
     const relayListPromises = contacts.map(async (contact) => {
       try {
-        // Fetch relay list with network skip for faster response (uses local cache)
-        const relayMetadata = await relayListManager.fetchRelayList(contact.pubkey, true);
+        // Fetch relay list (uses local cache and network fetch)
+        const relayMetadata = await relayListManager.fetchRelayList(contact.pubkey);
         // Get read relays
         const readRelays = relayMetadata
           .filter((r) => r.type === 'read' || r.type === 'both')
@@ -391,8 +423,8 @@ export class ConsistencyRelayService {
     // Fetch relay lists for tagged pubkeys in parallel
     const relayListPromises = pubkeys.map(async (pubkey) => {
       try {
-        // Fetch relay list with network skip for faster response
-        const relayMetadata = await relayListManager.fetchRelayList(pubkey, true);
+        // Fetch relay list (uses local cache and network fetch)
+        const relayMetadata = await relayListManager.fetchRelayList(pubkey);
         // Get read relays (inbox)
         const readRelays = relayMetadata
           .filter((r) => r.type === 'read' || r.type === 'both')
@@ -420,61 +452,46 @@ export class ConsistencyRelayService {
   }
 
   /**
-   * Check if we have a previous record of events for a given kind
-   * Returns true if we have seen this event kind before, false otherwise
+   * Check if an event has already been broadcast
+   * Returns true if the event ID is in the broadcast history
    */
-  private async hasPreviousEventRecord(kind: number): Promise<boolean> {
+  private async hasBeenBroadcast(eventId: string): Promise<boolean> {
     try {
-      const key = `lastEventTimestamp_kind${kind}`;
+      const key = 'broadcastHistory';
       const result = await chrome.storage.local.get(key);
-      const lastTimestamp = result[key];
+      const history: string[] = result[key] || [];
       
-      return lastTimestamp !== undefined && lastTimestamp !== null;
+      return history.includes(eventId);
     } catch (error) {
-      console.error('[ConsistencyRelay] Error checking previous event record:', error);
+      console.error('[ConsistencyRelay] Error checking broadcast history:', error);
       return false;
     }
   }
 
   /**
-   * Check if an event is newer than the last one we've seen for its kind
-   * Returns true if this is the first event or if it's newer than the last one
+   * Mark an event as broadcast by adding its ID to the history
+   * Maintains a rolling history of the last 1000 broadcast event IDs
    */
-  private async isNewerEvent(event: NostrEvent): Promise<boolean> {
+  private async markAsBroadcast(eventId: string): Promise<void> {
     try {
-      const key = `lastEventTimestamp_kind${event.kind}`;
+      const key = 'broadcastHistory';
       const result = await chrome.storage.local.get(key);
-      const lastTimestamp = result[key];
+      const history: string[] = result[key] || [];
       
-      if (!lastTimestamp) {
-        console.log('[ConsistencyRelay] First event of kind', event.kind);
-        return true;
+      // Add the event ID if it's not already in the history
+      if (!history.includes(eventId)) {
+        history.unshift(eventId);
+        
+        // Keep only the last 1000 event IDs to avoid storage bloat
+        if (history.length > 1000) {
+          history.splice(1000);
+        }
+        
+        await chrome.storage.local.set({ [key]: history });
+        console.log('[ConsistencyRelay] Marked event', eventId.substring(0, 8), 'as broadcast');
       }
-      
-      if (event.created_at > lastTimestamp) {
-        console.log('[ConsistencyRelay] Event is newer:', event.created_at, '>', lastTimestamp);
-        return true;
-      }
-      
-      console.log('[ConsistencyRelay] Event is not newer:', event.created_at, '<=', lastTimestamp);
-      return false;
     } catch (error) {
-      console.error('[ConsistencyRelay] Error checking event timestamp:', error);
-      // In case of error, allow the broadcast
-      return true;
-    }
-  }
-
-  /**
-   * Store the timestamp of an event for future comparison
-   */
-  private async storeEventTimestamp(event: NostrEvent): Promise<void> {
-    try {
-      const key = `lastEventTimestamp_kind${event.kind}`;
-      await chrome.storage.local.set({ [key]: event.created_at });
-      console.log('[ConsistencyRelay] Stored timestamp for kind', event.kind, ':', event.created_at);
-    } catch (error) {
-      console.error('[ConsistencyRelay] Error storing event timestamp:', error);
+      console.error('[ConsistencyRelay] Error marking event as broadcast:', error);
     }
   }
 
@@ -539,6 +556,11 @@ export class ConsistencyRelayService {
     console.log(
       `[ConsistencyRelay] Broadcast complete: ${successCount} succeeded, ${duplicateCount} duplicates, ${failureCount} failed`
     );
+
+    // Mark event as broadcast if at least one relay accepted it (excluding duplicates)
+    if (successCount > 0) {
+      await this.markAsBroadcast(event.id);
+    }
   }
 
   /**

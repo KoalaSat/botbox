@@ -51,6 +51,7 @@ export interface UserData {
   relays: string[]; // Legacy simple relay list
   relayMetadata?: RelayMetadata[]; // NIP-65 relay list with read/write markers
   lastUpdated: number;
+  firstLoginTimestamp?: number; // Timestamp of first login (used to filter old events)
 }
 
 const STORAGE_KEYS = {
@@ -185,10 +186,35 @@ export class Database {
   }
 
   /**
-   * Clear all data
+   * Clear all data including user data, cached relay lists, and broadcast history
    */
   static async clear(): Promise<void> {
-    await chrome.storage.local.clear();
+    // Get all keys from storage
+    const allData = await chrome.storage.local.get(null);
+    const keys = Object.keys(allData);
+    
+    // Find all keys that need to be removed
+    const keysToRemove = keys.filter(key => {
+      // Remove user data keys
+      if (key === STORAGE_KEYS.USER_DATA) return true;
+      if (key === STORAGE_KEYS.CONTACT_PROFILES) return true;
+      if (key === STORAGE_KEYS.CONSISTENCY_RELAY_URL) return true;
+      
+      // Remove cached relay lists (format: relayList_${pubkey})
+      if (key.startsWith('relayList_')) return true;
+      
+      // Remove broadcast history
+      if (key === 'broadcastHistory') return true;
+      
+      return false;
+    });
+    
+    console.log('[Database] Clearing', keysToRemove.length, 'keys from storage');
+    
+    // Remove all identified keys
+    if (keysToRemove.length > 0) {
+      await chrome.storage.local.remove(keysToRemove);
+    }
   }
 
   /**
@@ -219,5 +245,27 @@ export class Database {
    */
   static async clearConsistencyRelayUrl(): Promise<void> {
     await chrome.storage.local.remove(STORAGE_KEYS.CONSISTENCY_RELAY_URL);
+  }
+
+  /**
+   * Get first login timestamp (used to filter old events from consistency relay)
+   * Returns null if user has never logged in
+   */
+  static async getFirstLoginTimestamp(): Promise<number | null> {
+    const userData = await this.getUserData();
+    return userData?.firstLoginTimestamp || null;
+  }
+
+  /**
+   * Set first login timestamp if not already set
+   * This should only be set once on the user's first login
+   */
+  static async ensureFirstLoginTimestamp(): Promise<void> {
+    const userData = await this.getUserData();
+    if (userData && !userData.firstLoginTimestamp) {
+      userData.firstLoginTimestamp = Math.floor(Date.now() / 1000); // Unix timestamp in seconds
+      await this.setUserData(userData);
+      console.log('[Database] Set first login timestamp:', userData.firstLoginTimestamp);
+    }
   }
 }

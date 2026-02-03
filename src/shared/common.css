@@ -535,6 +535,7 @@ main::-webkit-scrollbar {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  margin-top: 8px;
 }
 
 /* Generic page header with search/actions */
