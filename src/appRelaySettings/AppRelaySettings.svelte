@@ -15,7 +15,7 @@
   });
 
   async function loadRelayUrl() {
-    const url = await Database.getAppRelayUrl();
+    const url = await Database.getConsistencyRelayUrl();
     if (url) {
       relayUrl = url;
     }
@@ -92,8 +92,8 @@
     success = "";
 
     try {
-      await Database.setAppRelayUrl(relayUrl.trim());
-      success = "App relay configured successfully!";
+      await Database.setConsistencyRelayUrl(relayUrl.trim());
+      success = "Consistency relay configured successfully!";
 
       // Clear success message after 3 seconds
       setTimeout(() => {
@@ -109,7 +109,7 @@
 
   async function clearRelay() {
     if (
-      !confirm("Are you sure you want to remove the app relay configuration?")
+      !confirm("Are you sure you want to remove the consistency relay configuration?")
     ) {
       return;
     }
@@ -118,9 +118,9 @@
     error = "";
 
     try {
-      await Database.clearAppRelayUrl();
+      await Database.clearConsistencyRelayUrl();
       relayUrl = "";
-      success = "App relay configuration cleared";
+      success = "Consistency relay configuration cleared";
       testResult = null;
 
       setTimeout(() => {
@@ -152,7 +152,7 @@
     {/if}
 
     <div class="form-container">
-      <h3>Main Relay Configuration</h3>
+      <h3>Consistency Relay Configuration</h3>
 
       <p class="form-help">
         Configure a relay to store and view events from your extension. This can

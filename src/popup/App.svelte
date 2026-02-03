@@ -7,7 +7,7 @@
   import Contacts from '../contacts/Contacts.svelte';
   import Relays from '../relays/Relays.svelte';
   import LocalRelayEvents from '../localRelayEvents/LocalRelayEvents.svelte';
-  import AppRelaySettings from '../appRelaySettings/AppRelaySettings.svelte';
+  import ConsistencyRelaySettings from '../appRelaySettings/AppRelaySettings.svelte';
   import { Zap, User, RefreshCw, LogOut, X, ExternalLink, ArrowLeft } from 'lucide-svelte';
   import { formatPubkey } from '../shared/formatters';
 
@@ -17,11 +17,11 @@
   let userData: UserData | null = null;
   let contacts: StoredContact[] = [];
   let isFetchingContacts = false;
-  let currentView: 'home' | 'contacts' | 'relays' | 'localRelayEvents' | 'appRelaySettings' = 'home';
+  let currentView: 'home' | 'contacts' | 'relays' | 'localRelayEvents' | 'consistencyRelaySettings' = 'home';
   let contactsComponent: Contacts;
   let relaysComponent: Relays;
   let localRelayEventsComponent: LocalRelayEvents;
-  let appRelayUrl: string | null = null;
+  let consistencyRelayUrl: string | null = null;
 
   /**
    * Handle storage changes - refresh data when updated
@@ -46,8 +46,8 @@
       }
     });
     
-    // Load app relay URL
-    loadAppRelayUrl();
+    // Load consistency relay URL
+    loadConsistencyRelayUrl();
     
     // Listen for storage changes to auto-refresh data
     chrome.storage.onChanged.addListener(handleStorageChange);
@@ -58,8 +58,8 @@
     };
   });
 
-  async function loadAppRelayUrl() {
-    appRelayUrl = await Database.getAppRelayUrl();
+  async function loadConsistencyRelayUrl() {
+    consistencyRelayUrl = await Database.getConsistencyRelayUrl();
   }
 
   async function checkLoginStatus() {
@@ -230,24 +230,24 @@
     currentView = 'localRelayEvents';
   }
 
-  function showAppRelaySettings() {
-    currentView = 'appRelaySettings';
+  function showConsistencyRelaySettings() {
+    currentView = 'consistencyRelaySettings';
   }
 
-  async function handleAppRelayBoxClick() {
-    if (appRelayUrl) {
+  async function handleConsistencyRelayBoxClick() {
+    if (consistencyRelayUrl) {
       // If configured, show events
       showLocalRelayEvents();
     } else {
       // If not configured, show settings
-      showAppRelaySettings();
+      showConsistencyRelaySettings();
     }
   }
 
   function showHome() {
     currentView = 'home';
-    // Reload app relay URL when returning home
-    loadAppRelayUrl();
+    // Reload consistency relay URL when returning home
+    loadConsistencyRelayUrl();
   }
 </script>
 
@@ -354,21 +354,21 @@
 
       <div 
         class="info-box info-box-clickable"
-        on:click={handleAppRelayBoxClick}
-        on:keydown={(e) => e.key === 'Enter' && handleAppRelayBoxClick()}
+        on:click={handleConsistencyRelayBoxClick}
+        on:keydown={(e) => e.key === 'Enter' && handleConsistencyRelayBoxClick()}
         role="button"
         tabindex="0"
-        title={appRelayUrl ? 'Click to view relay events' : 'Click to configure app relay'}
+        title={consistencyRelayUrl ? 'Click to view relay events' : 'Click to configure consistency relay'}
       >
         <div class="relay-info">
           <div class="relay-header">
             <Zap size={16} />
-            <strong>App Relay</strong>
+            <strong>Consistency Relay</strong>
           </div>
-          {#if appRelayUrl}
+          {#if consistencyRelayUrl}
             <div class="relay-details">
               <div class="relay-url">
-                <code>{appRelayUrl}</code>
+                <code>{consistencyRelayUrl}</code>
               </div>
             </div>
             <p class="relay-description">
@@ -376,7 +376,7 @@
             </p>
           {:else}
             <p class="relay-description">
-              Not configured. Click to set up your app relay.
+              Not configured. Click to set up your consistency relay.
             </p>
           {/if}
         </div>
@@ -410,22 +410,22 @@
           <ArrowLeft size={16} />
           Back
         </button>
-        <h2>App Relay Events</h2>
-        <button class="btn-back" on:click={showAppRelaySettings}>
+        <h2>Consistency Relay</h2>
+        <button class="btn-back" on:click={showConsistencyRelaySettings}>
           Settings
         </button>
       </div>
       <LocalRelayEvents bind:this={localRelayEventsComponent} />
-    {:else if currentView === 'appRelaySettings'}
+    {:else if currentView === 'consistencyRelaySettings'}
       <div class="nav-header">
-        <button class="btn-back" on:click={showHome}>
+        <button class="btn-back" on:click={showLocalRelayEvents}>
           <ArrowLeft size={16} />
           Back
         </button>
-        <h2>App Relay</h2>
+        <h2>Consistency Settings</h2>
         <div></div>
       </div>
-      <AppRelaySettings />
+      <ConsistencyRelaySettings />
     {/if}
   {/if}
 </main>

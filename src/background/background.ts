@@ -10,6 +10,7 @@ import { RelayListManager } from '../services/relayListManager';
 import { Database, type UserData, type RelayMetadata } from '../services/db';
 import { Nip07TabService } from '../services/nip07Tab';
 import { fetchRelayInfoBatch } from '../services/nip11';
+import type { Event as NostrEvent, Filter } from 'nostr-tools';
 
 // Inline types and enums to avoid code splitting
 enum MessageType {
@@ -35,6 +36,12 @@ enum MessageType {
   
   // Refresh all data (profile, contacts, relays)
   REFRESH_DATA = 'REFRESH_DATA',
+  
+  // Consistency relay events
+  GET_CONSISTENCY_RELAY_EVENTS = 'GET_CONSISTENCY_RELAY_EVENTS',
+  GET_CONSISTENCY_RELAY_STATUS = 'GET_CONSISTENCY_RELAY_STATUS',
+  CONNECT_CONSISTENCY_RELAY = 'CONNECT_CONSISTENCY_RELAY',
+  DISCONNECT_CONSISTENCY_RELAY = 'DISCONNECT_CONSISTENCY_RELAY',
 }
 
 interface Message {
@@ -178,6 +185,30 @@ chrome.runtime.onMessage.addListener(
       case MessageType.REFRESH_DATA:
         handleRefreshData()
           .then((data) => sendResponse({ success: true, data }))
+          .catch((error) => sendResponse({ success: false, error: error.message }));
+        return true;
+
+      case MessageType.GET_CONSISTENCY_RELAY_EVENTS:
+        handleGetConsistencyRelayEvents()
+          .then((data) => sendResponse({ success: true, data }))
+          .catch((error) => sendResponse({ success: false, error: error.message }));
+        return true;
+
+      case MessageType.GET_CONSISTENCY_RELAY_STATUS:
+        handleGetConsistencyRelayStatus()
+          .then((data) => sendResponse({ success: true, data }))
+          .catch((error) => sendResponse({ success: false, error: error.message }));
+        return true;
+
+      case MessageType.CONNECT_CONSISTENCY_RELAY:
+        handleConnectConsistencyRelay()
+          .then(() => sendResponse({ success: true }))
+          .catch((error) => sendResponse({ success: false, error: error.message }));
+        return true;
+
+      case MessageType.DISCONNECT_CONSISTENCY_RELAY:
+        handleDisconnectConsistencyRelay()
+          .then(() => sendResponse({ success: true }))
           .catch((error) => sendResponse({ success: false, error: error.message }));
         return true;
 
@@ -618,3 +649,406 @@ async function handlePublishRelayList(): Promise<void> {
   // Publish the relay list
   await relayListManager.publishRelayList(relayList, signEvent);
 }
+
+/**
+ * Consistency Relay Management
+ */
+
+// Store for consistency relay
+let consistencyRelayWs: WebSocket | null = null;
+let consistencyRelayEvents: NostrEvent[] = [];
+let consistencyRelayUrl: string | null = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_DELAY = 5000; // 5 seconds
+
+/**
+ * Initialize consistency relay connection on startup
+ */
+async function initializeConsistencyRelay(): Promise<void> {
+  const userData = await Database.getUserData();
+  if (!userData) {
+    return; // Not logged in yet
+  }
+
+  const relayUrl = await Database.getConsistencyRelayUrl();
+  if (relayUrl) {
+    console.log('[ConsistencyRelay] Auto-connecting to:', relayUrl);
+    await connectToConsistencyRelay(relayUrl, userData.pubkey);
+  }
+}
+
+/**
+ * Connect to consistency relay
+ */
+async function connectToConsistencyRelay(url: string, pubkey: string): Promise<void> {
+  // Close existing connection if any
+  if (consistencyRelayWs) {
+    consistencyRelayWs.close();
+    consistencyRelayWs = null;
+  }
+
+  consistencyRelayUrl = url;
+  
+  return new Promise((resolve, reject) => {
+    try {
+      const ws = new WebSocket(url);
+      
+      ws.onopen = () => {
+        console.log('[ConsistencyRelay] Connected to:', url);
+        consistencyRelayWs = ws;
+        reconnectAttempts = 0;
+        
+        // Subscribe to user's events
+        const subscriptionId = 'consistency-relay-' + Date.now();
+        const filter = { authors: [pubkey] };
+        const req = JSON.stringify(['REQ', subscriptionId, filter]);
+        ws.send(req);
+        
+        resolve();
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          handleConsistencyRelayMessage(message);
+        } catch (err) {
+          console.error('[ConsistencyRelay] Error parsing message:', err);
+        }
+      };
+
+      ws.onerror = (err) => {
+        console.error('[ConsistencyRelay] WebSocket error:', err);
+        reject(new Error('Failed to connect to consistency relay'));
+      };
+
+      ws.onclose = () => {
+        console.log('[ConsistencyRelay] Disconnected');
+        consistencyRelayWs = null;
+        
+        // Auto-reconnect if not manually disconnected
+        if (consistencyRelayUrl && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+          reconnectAttempts++;
+          console.log(`[ConsistencyRelay] Reconnecting attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}...`);
+          setTimeout(async () => {
+            const userData = await Database.getUserData();
+            if (userData && consistencyRelayUrl) {
+              await connectToConsistencyRelay(consistencyRelayUrl, userData.pubkey).catch(console.error);
+            }
+          }, RECONNECT_DELAY);
+        }
+      };
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+/**
+ * Extract pubkeys from event tags (p tags)
+ */
+function extractTaggedPubkeys(event: NostrEvent): string[] {
+  const pubkeys: string[] = [];
+  for (const tag of event.tags) {
+    if (tag[0] === 'p' && tag[1]) {
+      pubkeys.push(tag[1]);
+    }
+  }
+  return pubkeys;
+}
+
+/**
+ * Broadcast event to user's outbox relays and tagged users' inbox relays
+ * Uses direct WebSocket connections to capture detailed relay responses
+ */
+async function broadcastEventToOutboxAndInbox(event: NostrEvent): Promise<void> {
+  try {
+    console.log('[ConsistencyRelay] Broadcasting event', event.id.substring(0, 8), 'kind:', event.kind);
+    
+    const userData = await Database.getUserData();
+    if (!userData) {
+      console.warn('[ConsistencyRelay] No user data, cannot broadcast');
+      return;
+    }
+
+    const rm = await getRelayManager();
+    const relayListManager = new RelayListManager(rm);
+    
+    // Get user's outbox relays (write relays)
+    const outboxRelays = await relayListManager.getWriteRelays();
+    console.log('[ConsistencyRelay] User outbox relays:', outboxRelays.length);
+    
+    // Extract tagged pubkeys
+    const taggedPubkeys = extractTaggedPubkeys(event);
+    console.log('[ConsistencyRelay] Tagged pubkeys:', taggedPubkeys.length);
+    
+    // Collect all inbox relays for tagged pubkeys
+    const inboxRelaysSet = new Set<string>();
+    
+    if (taggedPubkeys.length > 0) {
+      // Fetch relay lists for tagged pubkeys in parallel
+      const relayListPromises = taggedPubkeys.map(async (pubkey) => {
+        try {
+          // Fetch relay list with network skip for faster response
+          const relayMetadata = await relayListManager.fetchRelayList(pubkey, true);
+          // Get read relays (inbox)
+          const readRelays = relayMetadata
+            .filter(r => r.type === 'read' || r.type === 'both')
+            .map(r => r.url);
+          return readRelays;
+        } catch (error) {
+          console.warn('[ConsistencyRelay] Failed to fetch relay list for', pubkey.substring(0, 8), ':', error);
+          return [];
+        }
+      });
+      
+      const allInboxRelays = await Promise.all(relayListPromises);
+      
+      // Flatten and deduplicate
+      allInboxRelays.forEach(relays => {
+        relays.forEach(relay => inboxRelaysSet.add(relay));
+      });
+    }
+    
+    const inboxRelays = Array.from(inboxRelaysSet);
+    console.log('[ConsistencyRelay] Tagged users inbox relays:', inboxRelays.length);
+    
+    // Combine and deduplicate all target relays
+    let allTargetRelays = [...new Set([...outboxRelays, ...inboxRelays])];
+    
+    // Exclude the consistency relay itself (we're receiving FROM it, not sending TO it)
+    if (consistencyRelayUrl) {
+      const beforeCount = allTargetRelays.length;
+      allTargetRelays = allTargetRelays.filter(url => url !== consistencyRelayUrl);
+      if (beforeCount !== allTargetRelays.length) {
+        console.log('[ConsistencyRelay] Excluded consistency relay from broadcast targets');
+      }
+    }
+    
+    console.log('[ConsistencyRelay] Total target relays (deduplicated):', allTargetRelays.length);
+    
+    if (allTargetRelays.length === 0) {
+      console.warn('[ConsistencyRelay] No target relays found, cannot broadcast');
+      return;
+    }
+    
+    // Broadcast to each relay individually to capture detailed responses
+    const broadcastPromises = allTargetRelays.map(relayUrl => 
+      broadcastToSingleRelay(relayUrl, event)
+    );
+    
+    const results = await Promise.allSettled(broadcastPromises);
+    
+    let successCount = 0;
+    let duplicateCount = 0;
+    let failureCount = 0;
+    
+    results.forEach((result, index) => {
+      const relayUrl = allTargetRelays[index];
+      if (result.status === 'fulfilled') {
+        const response = result.value;
+        if (response.success) {
+          successCount++;
+          if (response.duplicate) {
+            duplicateCount++;
+            console.log(`[ConsistencyRelay] ℹ ${relayUrl} already had the event`);
+          }
+        } else {
+          failureCount++;
+        }
+      } else {
+        failureCount++;
+        console.error(`[ConsistencyRelay] ✗ Failed to broadcast to ${relayUrl}:`, result.reason);
+      }
+    });
+    
+    console.log(`[ConsistencyRelay] Broadcast complete: ${successCount} succeeded, ${duplicateCount} duplicates, ${failureCount} failed`);
+    
+  } catch (error) {
+    console.error('[ConsistencyRelay] Error broadcasting event:', error);
+  }
+}
+
+/**
+ * Broadcast event to a single relay and capture the OK response
+ */
+async function broadcastToSingleRelay(relayUrl: string, event: NostrEvent): Promise<{ success: boolean; duplicate: boolean; message?: string }> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      ws.close();
+      resolve({ success: false, duplicate: false, message: 'Timeout' });
+    }, 5000);
+
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(relayUrl);
+    } catch (error) {
+      clearTimeout(timeout);
+      resolve({ success: false, duplicate: false, message: `Connection error: ${error}` });
+      return;
+    }
+
+    ws.onopen = () => {
+      // Send EVENT message
+      const eventMessage = JSON.stringify(['EVENT', event]);
+      ws.send(eventMessage);
+    };
+
+    ws.onmessage = (msg) => {
+      try {
+        const data = JSON.parse(msg.data);
+        const [type, eventId, accepted, message] = data;
+        
+        // NIP-20: OK messages
+        if (type === 'OK' && eventId === event.id) {
+          clearTimeout(timeout);
+          ws.close();
+          
+          if (accepted) {
+            // Check if the message indicates the event already existed
+            const isDuplicate = message && (
+              message.toLowerCase().includes('duplicate') ||
+              message.toLowerCase().includes('already have') ||
+              message.toLowerCase().includes('already exists')
+            );
+            
+            resolve({ 
+              success: true, 
+              duplicate: isDuplicate,
+              message: message || undefined 
+            });
+          } else {
+            console.warn(`[ConsistencyRelay] ${relayUrl} rejected event:`, message);
+            resolve({ 
+              success: false, 
+              duplicate: false,
+              message: message || 'Event rejected' 
+            });
+          }
+        }
+      } catch (error) {
+        console.error(`[ConsistencyRelay] Error parsing message from ${relayUrl}:`, error);
+      }
+    };
+
+    ws.onerror = (error) => {
+      clearTimeout(timeout);
+      resolve({ success: false, duplicate: false, message: `WebSocket error: ${error}` });
+    };
+
+    ws.onclose = () => {
+      clearTimeout(timeout);
+      // If we haven't resolved yet, it means we didn't get an OK response
+      resolve({ success: false, duplicate: false, message: 'Connection closed without response' });
+    };
+  });
+}
+
+/**
+ * Handle messages from consistency relay
+ */
+function handleConsistencyRelayMessage(message: any[]): void {
+  const [type, ...args] = message;
+
+  switch (type) {
+    case 'EVENT':
+      const [subscriptionId, event] = args;
+      // Add event if it doesn't exist
+      if (!consistencyRelayEvents.find(e => e.id === event.id)) {
+        consistencyRelayEvents = [event, ...consistencyRelayEvents];
+        // Keep only last 1000 events in memory
+        if (consistencyRelayEvents.length > 1000) {
+          consistencyRelayEvents = consistencyRelayEvents.slice(0, 1000);
+        }
+        console.log('[ConsistencyRelay] New event received:', event.kind);
+        
+        // Broadcast event to outbox and inbox relays
+        broadcastEventToOutboxAndInbox(event).catch(error => {
+          console.error('[ConsistencyRelay] Failed to broadcast event:', error);
+        });
+      }
+      break;
+    
+    case 'EOSE':
+      console.log('[ConsistencyRelay] End of stored events');
+      break;
+    
+    case 'NOTICE':
+      console.log('[ConsistencyRelay] Notice:', args[0]);
+      break;
+  }
+}
+
+/**
+ * Handle connect consistency relay request
+ */
+async function handleConnectConsistencyRelay(): Promise<void> {
+  const userData = await Database.getUserData();
+  if (!userData) {
+    throw new Error('User not logged in');
+  }
+
+  const relayUrl = await Database.getConsistencyRelayUrl();
+  if (!relayUrl) {
+    throw new Error('Consistency relay not configured');
+  }
+
+  await connectToConsistencyRelay(relayUrl, userData.pubkey);
+}
+
+/**
+ * Handle disconnect consistency relay request
+ */
+async function handleDisconnectConsistencyRelay(): Promise<void> {
+  if (consistencyRelayWs) {
+    consistencyRelayWs.close();
+    consistencyRelayWs = null;
+  }
+  consistencyRelayUrl = null;
+  reconnectAttempts = MAX_RECONNECT_ATTEMPTS; // Prevent auto-reconnect
+}
+
+/**
+ * Handle get consistency relay events request
+ */
+async function handleGetConsistencyRelayEvents(): Promise<NostrEvent[]> {
+  return consistencyRelayEvents;
+}
+
+/**
+ * Handle get consistency relay status request
+ */
+async function handleGetConsistencyRelayStatus(): Promise<{ connected: boolean; url: string | null; reconnectAttempts: number }> {
+  const isConnected = consistencyRelayWs !== null && consistencyRelayWs.readyState === WebSocket.OPEN;
+  return {
+    connected: isConnected,
+    url: consistencyRelayUrl,
+    reconnectAttempts,
+  };
+}
+
+// Initialize consistency relay connection when user logs in
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === 'local' && changes.userData) {
+    // User logged in or out
+    if (changes.userData.newValue) {
+      initializeConsistencyRelay().catch(console.error);
+    } else {
+      // User logged out, disconnect
+      handleDisconnectConsistencyRelay().catch(console.error);
+    }
+  }
+  
+  if (areaName === 'local' && changes.consistencyRelayUrl) {
+    // Consistency relay URL changed
+    if (changes.consistencyRelayUrl.newValue) {
+      initializeConsistencyRelay().catch(console.error);
+    } else {
+      // URL removed, disconnect
+      handleDisconnectConsistencyRelay().catch(console.error);
+    }
+  }
+});
+
+// Try to connect on startup if user is already logged in
+initializeConsistencyRelay().catch(console.error);

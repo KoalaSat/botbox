@@ -56,7 +56,7 @@ export interface UserData {
 const STORAGE_KEYS = {
   USER_DATA: 'userData',
   CONTACT_PROFILES: 'contactProfiles',
-  APP_RELAY_URL: 'appRelayUrl',
+  CONSISTENCY_RELAY_URL: 'consistencyRelayUrl',
 } as const;
 
 export class Database {
@@ -200,24 +200,24 @@ export class Database {
   }
 
   /**
-   * Get app relay URL
+   * Get consistency relay URL
    */
-  static async getAppRelayUrl(): Promise<string | null> {
-    const result = await chrome.storage.local.get(STORAGE_KEYS.APP_RELAY_URL);
-    return result[STORAGE_KEYS.APP_RELAY_URL] || null;
+  static async getConsistencyRelayUrl(): Promise<string | null> {
+    const result = await chrome.storage.local.get(STORAGE_KEYS.CONSISTENCY_RELAY_URL);
+    return result[STORAGE_KEYS.CONSISTENCY_RELAY_URL] || null;
   }
 
   /**
-   * Set app relay URL
+   * Set consistency relay URL
    */
-  static async setAppRelayUrl(url: string): Promise<void> {
-    await chrome.storage.local.set({ [STORAGE_KEYS.APP_RELAY_URL]: url });
+  static async setConsistencyRelayUrl(url: string): Promise<void> {
+    await chrome.storage.local.set({ [STORAGE_KEYS.CONSISTENCY_RELAY_URL]: url });
   }
 
   /**
-   * Clear app relay URL
+   * Clear consistency relay URL
    */
-  static async clearAppRelayUrl(): Promise<void> {
-    await chrome.storage.local.remove(STORAGE_KEYS.APP_RELAY_URL);
+  static async clearConsistencyRelayUrl(): Promise<void> {
+    await chrome.storage.local.remove(STORAGE_KEYS.CONSISTENCY_RELAY_URL);
   }
 }
