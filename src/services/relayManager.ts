@@ -11,8 +11,6 @@ const DEFAULT_RELAYS = [
   'wss://nos.lol',                  // Fast and stable
   'wss://relay.primal.net',         // Primal's reliable relay
   'wss://nostr.wine',               // Popular relay
-  'wss://relay.snort.social',       // Re-added, may work for some users
-  'wss://offchain.pub',             // Reliable public relay
 ];
 
 export class RelayManager {

@@ -3,7 +3,7 @@
  * Runs in the context of web pages to access window.nostr (NIP-07)
  */
 
-console.log('Nostr Contacts Extension - Content script loaded');
+console.log('BotBox Extension - Content script loaded');
 
 // This content script serves as a bridge to access window.nostr
 // which is injected by NIP-07 extensions like Alby, nos2x, etc.

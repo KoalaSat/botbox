@@ -8,7 +8,7 @@
   import Relays from '../relays/Relays.svelte';
   import RelayEvents from '../relayEvents/RelayEvents.svelte';
   import InboxScanner from '../inboxScanner/InboxScanner.svelte';
-  import { Zap, User, RefreshCw, LogOut, X, ExternalLink, ArrowLeft } from 'lucide-svelte';
+  import { User, RefreshCw, LogOut, X, ExternalLink, ArrowLeft } from 'lucide-svelte';
   import { formatPubkey } from '../shared/formatters';
 
   let isLoggedIn = false;
@@ -266,7 +266,7 @@
 
 <main>
   <div class="header">
-    <h1><Zap size={24} /> Nostr Contacts</h1>
+    <h1><img src="./icon-128.png" alt="BotBox" style="height: 42px; vertical-align: middle;" /> BotBox</h1>
   </div>
 
   {#if error}
@@ -375,7 +375,7 @@
       >
         <div class="relay-info">
           <div class="relay-header">
-            <Zap size={16} />
+            <img src="./title.png" alt="" style="height: 16px; vertical-align: middle;" />
             <strong>Outbox Model</strong>
           </div>
           <p class="relay-description">

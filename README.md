@@ -1,4 +1,6 @@
-# ⚡ Nostr Contacts Manager
+# BotBox
+
+![Title](assets/title.png)
 
 A browser extension for managing your Nostr contacts locally using NIP-02 and NIP-07.
 

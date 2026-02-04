@@ -1,4 +1,4 @@
-# Usage Guide - Nostr Contacts Manager
+# Usage Guide - BotBox
 
 ## Quick Start
 
@@ -198,7 +198,7 @@ The event contains:
 1. Check chrome://extensions/ to verify it's loaded
 2. Pin the extension to toolbar:
    - Click puzzle icon in Chrome toolbar
-   - Find "Nostr Contacts Manager"
+   - Find "BotBox"
    - Click pin icon
 
 ## Advanced Usage
