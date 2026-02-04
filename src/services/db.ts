@@ -57,7 +57,6 @@ export interface UserData {
 const STORAGE_KEYS = {
   USER_DATA: 'userData',
   CONTACT_PROFILES: 'contactProfiles',
-  CONSISTENCY_RELAY_URL: 'consistencyRelayUrl',
 } as const;
 
 export class Database {
@@ -198,7 +197,6 @@ export class Database {
       // Remove user data keys
       if (key === STORAGE_KEYS.USER_DATA) return true;
       if (key === STORAGE_KEYS.CONTACT_PROFILES) return true;
-      if (key === STORAGE_KEYS.CONSISTENCY_RELAY_URL) return true;
       
       // Remove cached relay lists (format: relayList_${pubkey})
       if (key.startsWith('relayList_')) return true;
@@ -226,29 +224,7 @@ export class Database {
   }
 
   /**
-   * Get consistency relay URL
-   */
-  static async getConsistencyRelayUrl(): Promise<string | null> {
-    const result = await chrome.storage.local.get(STORAGE_KEYS.CONSISTENCY_RELAY_URL);
-    return result[STORAGE_KEYS.CONSISTENCY_RELAY_URL] || null;
-  }
-
-  /**
-   * Set consistency relay URL
-   */
-  static async setConsistencyRelayUrl(url: string): Promise<void> {
-    await chrome.storage.local.set({ [STORAGE_KEYS.CONSISTENCY_RELAY_URL]: url });
-  }
-
-  /**
-   * Clear consistency relay URL
-   */
-  static async clearConsistencyRelayUrl(): Promise<void> {
-    await chrome.storage.local.remove(STORAGE_KEYS.CONSISTENCY_RELAY_URL);
-  }
-
-  /**
-   * Get first login timestamp (used to filter old events from consistency relay)
+   * Get first login timestamp (used to filter old events from outbox model)
    * Returns null if user has never logged in
    */
   static async getFirstLoginTimestamp(): Promise<number | null> {

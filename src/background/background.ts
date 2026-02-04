@@ -10,7 +10,8 @@ import { RelayListManager } from '../services/relayListManager';
 import { Database, type UserData, type RelayMetadata } from '../services/db';
 import { Nip07TabService } from '../services/nip07Tab';
 import { fetchRelayInfoBatch } from '../services/nip11';
-import { ConsistencyRelayService } from '../services/consistencyRelay';
+import { OutboxModelService } from '../services/outboxModel';
+import { InboxScannerService } from '../services/inboxScanner';
 import {
   handleAsync,
   handleAsyncWithPayload,
@@ -51,11 +52,17 @@ enum MessageType {
   UPDATE_RELAY_TYPE = 'UPDATE_RELAY_TYPE',
   PUBLISH_RELAY_LIST = 'PUBLISH_RELAY_LIST',
   
-  // Consistency Relay
-  GET_CONSISTENCY_RELAY_EVENTS = 'GET_CONSISTENCY_RELAY_EVENTS',
-  GET_CONSISTENCY_RELAY_STATUS = 'GET_CONSISTENCY_RELAY_STATUS',
-  CONNECT_CONSISTENCY_RELAY = 'CONNECT_CONSISTENCY_RELAY',
-  DISCONNECT_CONSISTENCY_RELAY = 'DISCONNECT_CONSISTENCY_RELAY',
+  // Outbox Model
+  GET_OUTBOX_MODEL_EVENTS = 'GET_OUTBOX_MODEL_EVENTS',
+  GET_OUTBOX_MODEL_STATUS = 'GET_OUTBOX_MODEL_STATUS',
+  CONNECT_OUTBOX_MODEL = 'CONNECT_OUTBOX_MODEL',
+  DISCONNECT_OUTBOX_MODEL = 'DISCONNECT_OUTBOX_MODEL',
+  
+  // Inbox Scanner
+  GET_INBOX_SCANNER_STATUS = 'GET_INBOX_SCANNER_STATUS',
+  GET_INBOX_SCANNER_EVENTS = 'GET_INBOX_SCANNER_EVENTS',
+  TRIGGER_INBOX_SCAN = 'TRIGGER_INBOX_SCAN',
+  TOGGLE_INBOX_SCANNER = 'TOGGLE_INBOX_SCANNER',
 }
 
 interface Message {
@@ -76,7 +83,8 @@ interface MessageResponse {
 console.log('Background service worker initialized');
 
 let relayManager: RelayManager | null = null;
-let consistencyRelay: ConsistencyRelayService | null = null;
+let outboxModel: OutboxModelService | null = null;
+let inboxScanner: InboxScannerService | null = null;
 
 // =============================================================================
 // Relay Manager
@@ -100,17 +108,27 @@ async function getRelayManager(): Promise<RelayManager> {
 }
 
 // =============================================================================
-// Consistency Relay
+// Outbox Model
 // =============================================================================
 
 /**
- * Get or create consistency relay service
+ * Get or create outbox model service
  */
-function getConsistencyRelay(): ConsistencyRelayService {
-  if (!consistencyRelay) {
-    consistencyRelay = new ConsistencyRelayService(getRelayManager);
+function getOutboxModel(): OutboxModelService {
+  if (!outboxModel) {
+    outboxModel = new OutboxModelService(getRelayManager);
   }
-  return consistencyRelay;
+  return outboxModel;
+}
+
+/**
+ * Get or create inbox scanner service
+ */
+function getInboxScanner(): InboxScannerService {
+  if (!inboxScanner) {
+    inboxScanner = new InboxScannerService(getRelayManager);
+  }
+  return inboxScanner;
 }
 
 // =============================================================================
@@ -130,28 +148,31 @@ chrome.runtime.onInstalled.addListener((details) => {
 });
 
 /**
- * Listen for storage changes to handle login/logout and consistency relay
+ * Listen for storage changes to handle login/logout
  */
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName === 'local' && changes.userData) {
     if (changes.userData.newValue) {
-      getConsistencyRelay().initialize().catch(console.error);
+      // User logged in - initialize outbox model with all user relays
+      getOutboxModel().initialize().catch(console.error);
     } else {
-      getConsistencyRelay().disconnect();
-    }
-  }
-  
-  if (areaName === 'local' && changes.consistencyRelayUrl) {
-    if (changes.consistencyRelayUrl.newValue) {
-      getConsistencyRelay().initialize().catch(console.error);
-    } else {
-      getConsistencyRelay().disconnect();
+      // User logged out - disconnect all relay connections
+      getOutboxModel().disconnect();
     }
   }
 });
 
-// Initialize consistency relay on startup if user is logged in
-getConsistencyRelay().initialize().catch(console.error);
+// Initialize outbox model and inbox scanner on startup if user is logged in
+Database.getUserData().then(userData => {
+  if (userData) {
+    console.log('[Background] User logged in, initializing services');
+    getOutboxModel().initialize().catch(console.error);
+    getInboxScanner().initialize().catch(console.error);
+  } else {
+    console.log('[Background] No user logged in, skipping service initialization');
+  }
+}).catch(console.error);
+
 
 // =============================================================================
 // Message Router
@@ -221,18 +242,31 @@ chrome.runtime.onMessage.addListener(
       case MessageType.PUBLISH_RELAY_LIST:
         return handleAsyncVoid(handlePublishRelayList, sendResponse);
 
-      // Consistency relay handlers
-      case MessageType.GET_CONSISTENCY_RELAY_EVENTS:
-        return handleAsync(handleGetConsistencyRelayEvents, sendResponse);
+      // Outbox model handlers
+      case MessageType.GET_OUTBOX_MODEL_EVENTS:
+        return handleAsync(handleGetOutboxModelEvents, sendResponse);
 
-      case MessageType.GET_CONSISTENCY_RELAY_STATUS:
-        return handleAsync(handleGetConsistencyRelayStatus, sendResponse);
+      case MessageType.GET_OUTBOX_MODEL_STATUS:
+        return handleAsync(handleGetOutboxModelStatus, sendResponse);
 
-      case MessageType.CONNECT_CONSISTENCY_RELAY:
-        return handleAsyncVoid(handleConnectConsistencyRelay, sendResponse);
+      case MessageType.CONNECT_OUTBOX_MODEL:
+        return handleAsyncVoid(handleConnectOutboxModel, sendResponse);
 
-      case MessageType.DISCONNECT_CONSISTENCY_RELAY:
-        return handleAsyncVoid(handleDisconnectConsistencyRelay, sendResponse);
+      case MessageType.DISCONNECT_OUTBOX_MODEL:
+        return handleAsyncVoid(handleDisconnectOutboxModel, sendResponse);
+
+      // Inbox scanner handlers
+      case MessageType.GET_INBOX_SCANNER_STATUS:
+        return handleAsync(handleGetInboxScannerStatus, sendResponse);
+
+      case MessageType.GET_INBOX_SCANNER_EVENTS:
+        return handleAsync(handleGetInboxScannerEvents, sendResponse);
+
+      case MessageType.TRIGGER_INBOX_SCAN:
+        return handleAsync(handleTriggerInboxScan, sendResponse);
+
+      case MessageType.TOGGLE_INBOX_SCANNER:
+        return handleAsync(handleToggleInboxScanner, sendResponse);
 
       // Storage handlers
       case MessageType.GET_DATA:
@@ -267,17 +301,32 @@ async function handleConnectNip07(): Promise<{
   pubkey: string; 
   relays: Record<string, { read: boolean; write: boolean }> | null 
 }> {
-  await Nip07TabService.ensureHelperTab();
-  
-  const hasProvider = await Nip07TabService.waitForProvider(5000, true);
-  if (!hasProvider) {
-    throw new Error('NIP-07 provider not found. Please install a Nostr extension like Alby or nos2x.');
+  try {
+    console.log('[NIP-07] Starting connection process...');
+    
+    await Nip07TabService.ensureHelperTab();
+    console.log('[NIP-07] Helper tab ensured');
+    
+    const hasProvider = await Nip07TabService.waitForProvider(10000, true);
+    console.log('[NIP-07] Provider check result:', hasProvider);
+    
+    if (!hasProvider) {
+      throw new Error('NIP-07 provider not found. Please install a Nostr extension like Alby or nos2x.');
+    }
+
+    console.log('[NIP-07] Getting public key...');
+    const pubkey = await Nip07TabService.getPublicKey();
+    console.log('[NIP-07] Got pubkey:', pubkey.substring(0, 8) + '...');
+    
+    console.log('[NIP-07] Getting relays...');
+    const relays = await Nip07TabService.getRelays();
+    console.log('[NIP-07] Got relays:', relays ? Object.keys(relays).length : 0);
+
+    return { pubkey, relays };
+  } catch (error) {
+    console.error('[NIP-07] Connection error:', error);
+    throw error;
   }
-
-  const pubkey = await Nip07TabService.getPublicKey();
-  const relays = await Nip07TabService.getRelays();
-
-  return { pubkey, relays };
 }
 
 /**
@@ -636,49 +685,74 @@ async function handlePublishRelayList(): Promise<void> {
 }
 
 // =============================================================================
-// Consistency Relay Handlers
+// Outbox Model Handlers
 // =============================================================================
 
 /**
- * Handle connect consistency relay request
+ * Handle connect outbox model request (now auto-connects to all user relays)
  */
-async function handleConnectConsistencyRelay(): Promise<void> {
-  const userData = await Database.getUserData();
-  if (!userData) {
-    throw new Error('User not logged in');
-  }
-
-  const relayUrl = await Database.getConsistencyRelayUrl();
-  if (!relayUrl) {
-    throw new Error('Consistency relay not configured');
-  }
-
-  await getConsistencyRelay().connect(relayUrl, userData.pubkey);
+async function handleConnectOutboxModel(): Promise<void> {
+  await getOutboxModel().initialize();
 }
 
 /**
- * Handle disconnect consistency relay request
+ * Handle disconnect outbox model request
  */
-async function handleDisconnectConsistencyRelay(): Promise<void> {
-  getConsistencyRelay().disconnect();
+async function handleDisconnectOutboxModel(): Promise<void> {
+  getOutboxModel().disconnect();
 }
 
 /**
- * Handle get consistency relay events request
+ * Handle get outbox model events request
  */
-async function handleGetConsistencyRelayEvents(): Promise<NostrEvent[]> {
-  return getConsistencyRelay().getEvents();
+async function handleGetOutboxModelEvents(): Promise<Array<NostrEvent & { relayCount: number }>> {
+  const outboxModel = getOutboxModel();
+  const events = outboxModel.getEvents();
+  
+  // Add relay count to each event
+  return events.map(event => ({
+    ...event,
+    relayCount: outboxModel.getRelayCount(event.id)
+  }));
 }
 
 /**
- * Handle get consistency relay status request
+ * Handle get outbox model status request
  */
-async function handleGetConsistencyRelayStatus(): Promise<{ 
-  connected: boolean; 
-  url: string | null; 
-  reconnectAttempts: number 
-}> {
-  return getConsistencyRelay().getStatus();
+async function handleGetOutboxModelStatus(): Promise<any> {
+  return getOutboxModel().getStatus();
+}
+
+// =============================================================================
+// Inbox Scanner Handlers
+// =============================================================================
+
+/**
+ * Handle get inbox scanner status request
+ */
+async function handleGetInboxScannerStatus(): Promise<any> {
+  return await getInboxScanner().getStatus();
+}
+
+/**
+ * Handle get inbox scanner events request
+ */
+async function handleGetInboxScannerEvents(): Promise<any> {
+  return await getInboxScanner().getDiscoveredEvents();
+}
+
+/**
+ * Handle trigger inbox scan request
+ */
+async function handleTriggerInboxScan(): Promise<any> {
+  return await getInboxScanner().performScan();
+}
+
+/**
+ * Handle toggle inbox scanner request
+ */
+async function handleToggleInboxScanner(): Promise<boolean> {
+  return await getInboxScanner().toggleEnabled();
 }
 
 // =============================================================================

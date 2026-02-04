@@ -105,6 +105,37 @@
   transform: translateY(0);
 }
 
+.info-box-compact {
+  padding: 12px 16px;
+}
+
+.relay-info {
+  flex: 1;
+}
+
+.relay-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 14px;
+}
+
+.relay-description {
+  font-size: 13px;
+  line-height: 1.4;
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.relay-description-small {
+  font-size: 12px;
+}
+
+.scanner-icon {
+  font-size: 16px;
+}
+
 /* Navigation header - only used in popup */
 .nav-header {
   display: flex;

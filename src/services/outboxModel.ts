@@ -1,8 +1,8 @@
 /**
- * Consistency Relay Service
- * Manages WebSocket connection to a consistency relay and monitors:
- * 1. Events authored by the user - broadcasts to user's outbox and tagged users' inbox relays
- * 2. Events where the user is tagged - broadcasts to user's inbox relays
+ * Outbox Model Service
+ * Manages WebSocket connections to multiple relays based on user's relay list:
+ * - Write relays: monitors events authored by the user
+ * - Read relays: monitors events where the user is tagged
  * 
  * Special handling for Profile (kind 0) and Relay List (kind 10002) events:
  * broadcasts to all read relays of contacts in the user's follow list
@@ -19,20 +19,29 @@ interface BroadcastResult {
   message?: string;
 }
 
-interface ConsistencyRelayStatus {
-  connected: boolean;
-  url: string | null;
+interface RelayConnection {
+  ws: WebSocket;
+  url: string;
+  type: 'write' | 'read';
   reconnectAttempts: number;
+  eoseReceived: boolean;
+}
+
+interface OutboxModelStatus {
+  writeRelays: Array<{ url: string; connected: boolean; eoseReceived: boolean }>;
+  readRelays: Array<{ url: string; connected: boolean; eoseReceived: boolean }>;
+  totalConnected: number;
+  totalRelays: number;
+  totalEoseReceived: number;
 }
 
 /**
- * Consistency Relay Service
+ * Outbox Model Service
  */
-export class ConsistencyRelayService {
-  private ws: WebSocket | null = null;
+export class OutboxModelService {
+  private connections: Map<string, RelayConnection> = new Map();
   private events: NostrEvent[] = [];
-  private url: string | null = null;
-  private reconnectAttempts = 0;
+  private eventRelayMap: Map<string, Set<string>> = new Map(); // eventId -> Set of relay URLs
   private readonly MAX_RECONNECT_ATTEMPTS = 3;
   private readonly RECONNECT_DELAY = 5000; // 5 seconds
   private readonly MAX_EVENTS_IN_MEMORY = 1000;
@@ -41,106 +50,160 @@ export class ConsistencyRelayService {
   constructor(private getRelayManager: () => Promise<RelayManager>) {}
 
   /**
-   * Initialize connection on startup if user is logged in
+   * Initialize connections on startup if user is logged in
    */
   async initialize(): Promise<void> {
     const userData = await Database.getUserData();
     if (!userData) {
-      return; // Not logged in yet
+      console.log('[OutboxModel] No user data, skipping initialization');
+      return;
     }
 
-    const relayUrl = await Database.getConsistencyRelayUrl();
-    if (relayUrl) {
-      console.log('[ConsistencyRelay] Auto-connecting to:', relayUrl);
-      await this.connect(relayUrl, userData.pubkey)
-    }
+    console.log('[OutboxModel] Initializing multi-relay connections');
+    await this.connectToUserRelays(userData.pubkey);
   }
 
   /**
-   * Connect to consistency relay
+   * Connect to all user's write and read relays
    */
-  async connect(url: string, pubkey: string): Promise<void> {
-    // Close existing connection if any
+  async connectToUserRelays(pubkey: string): Promise<void> {
+    // Disconnect any existing connections first
     this.disconnect();
 
-    this.url = url;
+    const rm = await this.getRelayManager();
+    const relayListManager = new RelayListManager(rm);
 
-    return new Promise((resolve, reject) => {
+    // Get all relay metadata to determine capabilities
+    const relayMetadata = await relayListManager.getRelayList();
+    console.log(`[OutboxModel] Connecting to ${relayMetadata.length} relays`);
+    
+    for (const relay of relayMetadata) {
+      await this.connectToRelay(relay.url, pubkey, relay.type);
+    }
+
+    console.log(`[OutboxModel] Connected to ${this.connections.size} total relays`);
+  }
+
+  /**
+   * Connect to a single relay
+   */
+  private async connectToRelay(url: string, pubkey: string, type: 'write' | 'read' | 'both'): Promise<void> {
+    return new Promise((resolve) => {
       try {
         const ws = new WebSocket(url);
 
+        const connection: RelayConnection = {
+          ws,
+          url,
+          type: type === 'both' ? 'write' : type, // Store as 'write' for 'both' for backwards compatibility
+          reconnectAttempts: 0,
+          eoseReceived: false,
+        };
+
         ws.onopen = () => {
-          console.log('[ConsistencyRelay] Connected to:', url);
-          this.ws = ws;
-          this.reconnectAttempts = 0;
+          console.log(`[OutboxModel] Connected to ${type} relay:`, url);
+          
+          // Subscribe based on relay type
+          // For 'write' or 'both': subscribe to user's authored events
+          if (type === 'write' || type === 'both') {
+            const subscriptionId = `outbox-authored-${Date.now()}-${Math.random()}`;
+            const filter = { authors: [pubkey] };
+            const req = JSON.stringify(['REQ', subscriptionId, filter]);
+            ws.send(req);
+            console.log(`[OutboxModel] Subscribed to authored events on ${url}`);
+          }
+          
+          // For 'read' or 'both': subscribe to events where user is tagged
+          if (type === 'read' || type === 'both') {
+            const subscriptionId = `outbox-tagged-${Date.now()}-${Math.random()}`;
+            const filter = { '#p': [pubkey] };
+            const req = JSON.stringify(['REQ', subscriptionId, filter]);
+            ws.send(req);
+            console.log(`[OutboxModel] Subscribed to tagged events on ${url}`);
+          }
 
-          // Subscribe to user's events (authored by user)
-          const subscriptionId = 'consistency-relay-authored-' + Date.now();
-          const filter = { authors: [pubkey] };
-          const req = JSON.stringify(['REQ', subscriptionId, filter]);
-          ws.send(req);
-
-          // Subscribe to events where user is tagged
-          const taggedSubscriptionId = 'consistency-relay-tagged-' + Date.now();
-          const taggedFilter = { '#p': [pubkey] };
-          const taggedReq = JSON.stringify(['REQ', taggedSubscriptionId, taggedFilter]);
-          ws.send(taggedReq);
-
-          console.log('[ConsistencyRelay] Subscribed to authored events and tagged events');
-
+          this.connections.set(url, connection);
           resolve();
         };
 
         ws.onmessage = (event) => {
           try {
             const message = JSON.parse(event.data);
-            this.handleMessage(message);
+            this.handleMessage(message, url);
           } catch (err) {
-            console.error('[ConsistencyRelay] Error parsing message:', err);
+            console.error(`[OutboxModel] Error parsing message from ${url}:`, err);
           }
         };
 
         ws.onerror = (err) => {
-          console.error('[ConsistencyRelay] WebSocket error:', err);
-          reject(new Error('Failed to connect to consistency relay'));
+          console.error(`[OutboxModel] WebSocket error on ${url}:`, err);
+          resolve(); // Resolve anyway to not block other connections
         };
 
         ws.onclose = () => {
-          console.log('[ConsistencyRelay] Disconnected');
-          this.ws = null;
+          console.log(`[OutboxModel] Disconnected from ${url}`);
+          this.connections.delete(url);
 
           // Auto-reconnect if not manually disconnected
-          this.attemptReconnect();
+          this.attemptReconnect(url, pubkey, type, connection.reconnectAttempts);
         };
       } catch (err) {
-        reject(err);
+        console.error(`[OutboxModel] Failed to connect to ${url}:`, err);
+        resolve();
       }
     });
   }
 
   /**
-   * Disconnect from consistency relay
+   * Disconnect from all relays
    */
   disconnect(): void {
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
+    console.log(`[OutboxModel] Disconnecting from ${this.connections.size} relays`);
+    
+    for (const [url, connection] of this.connections.entries()) {
+      connection.reconnectAttempts = this.MAX_RECONNECT_ATTEMPTS; // Prevent auto-reconnect
+      connection.ws.close();
     }
-    this.url = null;
-    this.reconnectAttempts = this.MAX_RECONNECT_ATTEMPTS; // Prevent auto-reconnect
-    // Clear in-memory events
+    
+    this.connections.clear();
     this.events = [];
   }
 
   /**
    * Get connection status
    */
-  getStatus(): ConsistencyRelayStatus {
-    const isConnected = this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+  getStatus(): OutboxModelStatus {
+    const writeRelays: Array<{ url: string; connected: boolean; eoseReceived: boolean }> = [];
+    const readRelays: Array<{ url: string; connected: boolean; eoseReceived: boolean }> = [];
+    let totalConnected = 0;
+    let totalEoseReceived = 0;
+
+    for (const [url, connection] of this.connections.entries()) {
+      const isConnected = connection.ws.readyState === WebSocket.OPEN;
+      
+      if (isConnected) {
+        totalConnected++;
+      }
+
+      if (connection.eoseReceived) {
+        totalEoseReceived++;
+      }
+
+      const relayStatus = { url, connected: isConnected, eoseReceived: connection.eoseReceived };
+      
+      if (connection.type === 'write') {
+        writeRelays.push(relayStatus);
+      } else {
+        readRelays.push(relayStatus);
+      }
+    }
+
     return {
-      connected: isConnected,
-      url: this.url,
-      reconnectAttempts: this.reconnectAttempts,
+      writeRelays,
+      readRelays,
+      totalConnected,
+      totalRelays: this.connections.size,
+      totalEoseReceived,
     };
   }
 
@@ -152,41 +215,68 @@ export class ConsistencyRelayService {
   }
 
   /**
-   * Attempt to reconnect to consistency relay
+   * Get relay count for an event
    */
-  private async attemptReconnect(): Promise<void> {
-    if (this.url && this.reconnectAttempts < this.MAX_RECONNECT_ATTEMPTS) {
-      this.reconnectAttempts++;
-      console.log(
-        `[ConsistencyRelay] Reconnecting attempt ${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS}...`
-      );
-      setTimeout(async () => {
-        const userData = await Database.getUserData();
-        if (userData && this.url) {
-          await this.connect(this.url, userData.pubkey).catch(console.error);
-        }
-      }, this.RECONNECT_DELAY);
-    }
+  getRelayCount(eventId: string): number {
+    return this.eventRelayMap.get(eventId)?.size || 0;
   }
 
   /**
-   * Handle messages from consistency relay
+   * Get relay URLs for an event
    */
-  private handleMessage(message: any[]): void {
+  getRelayUrls(eventId: string): string[] {
+    return Array.from(this.eventRelayMap.get(eventId) || []);
+  }
+
+  /**
+   * Attempt to reconnect to a relay
+   */
+  private async attemptReconnect(
+    url: string,
+    pubkey: string,
+    type: 'write' | 'read' | 'both',
+    currentAttempts: number
+  ): Promise<void> {
+    if (currentAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
+      console.log(`[OutboxModel] Max reconnect attempts reached for ${url}`);
+      return;
+    }
+
+    const nextAttempt = currentAttempts + 1;
+    console.log(
+      `[OutboxModel] Reconnecting to ${url} (attempt ${nextAttempt}/${this.MAX_RECONNECT_ATTEMPTS})...`
+    );
+
+    setTimeout(async () => {
+      const userData = await Database.getUserData();
+      if (userData) {
+        await this.connectToRelay(url, userData.pubkey, type);
+      }
+    }, this.RECONNECT_DELAY);
+  }
+
+  /**
+   * Handle messages from relays
+   */
+  private handleMessage(message: any[], relayUrl: string): void {
     const [type, ...args] = message;
 
     switch (type) {
       case 'EVENT':
         const [subscriptionId, event] = args;
-        this.handleEvent(event);
+        this.handleEvent(event, relayUrl);
         break;
 
       case 'EOSE':
-        console.log('[ConsistencyRelay] End of stored events');
+        const connection = this.connections.get(relayUrl);
+        if (connection) {
+          connection.eoseReceived = true;
+          console.log(`[OutboxModel] ✓ EOSE received from ${relayUrl}`);
+        }
         break;
 
       case 'NOTICE':
-        console.log('[ConsistencyRelay] Notice:', args[0]);
+        console.log(`[OutboxModel] Notice from ${relayUrl}:`, args[0]);
         break;
     }
   }
@@ -194,16 +284,22 @@ export class ConsistencyRelayService {
   /**
    * Handle incoming event
    */
-  private async handleEvent(event: NostrEvent): Promise<void> {
-    // Skip if event already exists
+  private async handleEvent(event: NostrEvent, relayUrl: string): Promise<void> {
+    // Track which relay this event was seen on
+    if (!this.eventRelayMap.has(event.id)) {
+      this.eventRelayMap.set(event.id, new Set());
+    }
+    this.eventRelayMap.get(event.id)!.add(relayUrl);
+
+    // Skip if event already exists (deduplication across relays)
     if (this.events.find((e) => e.id === event.id)) {
       return;
     }
 
-    // Skip follow list events (kind 3) from other users - they are not relevant
+    // Skip follow list events (kind 3) from other users
     const userData = await Database.getUserData();
     if (userData && event.kind === 3 && event.pubkey !== userData.pubkey) {
-      console.log('[ConsistencyRelay] Skipping follow list event from other user');
+      console.log('[OutboxModel] Skipping follow list event from other user');
       return;
     }
 
@@ -215,23 +311,25 @@ export class ConsistencyRelayService {
       this.events = this.events.slice(0, this.MAX_EVENTS_IN_MEMORY);
     }
     
-    console.log('[ConsistencyRelay] New event received:', event.kind);
+    console.log(`[OutboxModel] New event received from ${relayUrl}:`, event.kind, event.id.substring(0, 8));
 
-    // Broadcast event to outbox and inbox relays
+    // Broadcast event to appropriate relays
     this.broadcastEvent(event).catch((error) => {
-      console.error('[ConsistencyRelay] Failed to broadcast event:', error);
+      console.error('[OutboxModel] Failed to broadcast event:', error);
     });
   }
 
   /**
-   * Broadcast event to user's outbox relays and tagged users' inbox relays
+   * Broadcast event to appropriate relays based on event type
+   * - User-authored events: broadcast to user's write relays + tagged users' read relays
+   * - User-tagged events: broadcast to user's read relays
    * Special handling for Profile (kind 0) and Relay List (kind 10002) events:
    * these are broadcast to all read relays of all contacts in the user's follow list
    */
   private async broadcastEvent(event: NostrEvent): Promise<void> {
     try {
       console.log(
-        '[ConsistencyRelay] Broadcasting event',
+        '[OutboxModel] Broadcasting event',
         event.id.substring(0, 8),
         'kind:',
         event.kind
@@ -239,7 +337,7 @@ export class ConsistencyRelayService {
 
       const userData = await Database.getUserData();
       if (!userData) {
-        console.warn('[ConsistencyRelay] No user data, cannot broadcast');
+        console.warn('[OutboxModel] No user data, cannot broadcast');
         return;
       }
 
@@ -251,7 +349,7 @@ export class ConsistencyRelayService {
       // Check if this event has already been broadcast
       const alreadyBroadcast = await this.hasBeenBroadcast(event.id);
       if (alreadyBroadcast) {
-        console.log('[ConsistencyRelay] Event', event.id.substring(0, 8), 'already broadcast, skipping');
+        console.log('[OutboxModel] Event', event.id.substring(0, 8), 'already broadcast, skipping');
         return;
       }
 
@@ -259,7 +357,7 @@ export class ConsistencyRelayService {
       const firstLoginTimestamp = await Database.getFirstLoginTimestamp();
       if (firstLoginTimestamp && event.created_at < firstLoginTimestamp) {
         console.log(
-          '[ConsistencyRelay] Event created before first login (',
+          '[OutboxModel] Event created before first login (',
           event.created_at,
           '<',
           firstLoginTimestamp,
@@ -278,70 +376,70 @@ export class ConsistencyRelayService {
       if (!isUserAuthor && isUserTagged) {
         // Event where user is tagged (but not authored by user)
         // Broadcast to user's read relays (inbox)
-        console.log('[ConsistencyRelay] User is tagged in event, broadcasting to inbox relays');
+        console.log('[OutboxModel] User is tagged in event, broadcasting to inbox relays');
         const inboxRelays = await relayListManager.getReadRelays();
-        console.log('[ConsistencyRelay] User inbox relays:', inboxRelays.length);
+        console.log('[OutboxModel] User inbox relays:', inboxRelays.length);
         allTargetRelays = inboxRelays;
       } else if (isUserAuthor && (event.kind === 0 || event.kind === 10002)) {
         // Special handling for Profile (kind 0) and Relay List (kind 10002) events
         // authored by the user
-        console.log('[ConsistencyRelay] Special handling for Profile/Relay List event');
+        console.log('[OutboxModel] Special handling for Profile/Relay List event');
         
         // Get all contacts from user's follow list
         const contacts = userData.contacts || [];
-        console.log('[ConsistencyRelay] User has', contacts.length, 'contacts');
+        console.log('[OutboxModel] User has', contacts.length, 'contacts');
 
         if (contacts.length === 0) {
-          console.warn('[ConsistencyRelay] No contacts found, falling back to outbox relays');
+          console.warn('[OutboxModel] No contacts found, falling back to outbox relays');
           const outboxRelays = await relayListManager.getWriteRelays();
           allTargetRelays = outboxRelays;
         } else {
           // Collect all read relays for all contacts
           const contactsReadRelays = await this.collectReadRelaysForContacts(contacts, relayListManager);
-          console.log('[ConsistencyRelay] Collected', contactsReadRelays.length, 'read relays from contacts');
+          console.log('[OutboxModel] Collected', contactsReadRelays.length, 'read relays from contacts');
           
           // Also include user's own outbox relays
           const outboxRelays = await relayListManager.getWriteRelays();
-          console.log('[ConsistencyRelay] User outbox relays:', outboxRelays.length);
+          console.log('[OutboxModel] User outbox relays:', outboxRelays.length);
           
           // Combine and deduplicate
           allTargetRelays = [...new Set([...outboxRelays, ...contactsReadRelays])];
         }
       } else if (isUserAuthor) {
-        // Normal broadcasting for user-authored events: user's outbox + tagged users' inbox relays
-        console.log('[ConsistencyRelay] Broadcasting user-authored event');
+        // Normal broadcasting for user-authored events: user's write relays + tagged users' read relays
+        console.log('[OutboxModel] Broadcasting user-authored event');
         
-        // Get user's outbox relays (write relays)
+        // Get user's write relays (outbox)
         const outboxRelays = await relayListManager.getWriteRelays();
-        console.log('[ConsistencyRelay] User outbox relays:', outboxRelays.length);
+        console.log('[OutboxModel] User outbox relays:', outboxRelays.length);
 
-        console.log('[ConsistencyRelay] Tagged pubkeys:', taggedPubkeys.length);
+        console.log('[OutboxModel] Tagged pubkeys:', taggedPubkeys.length);
 
-        // Collect inbox relays for tagged pubkeys
+        // Collect read relays for tagged pubkeys (inbox)
         const inboxRelays = await this.collectInboxRelays(taggedPubkeys, relayListManager);
-        console.log('[ConsistencyRelay] Tagged users inbox relays:', inboxRelays.length);
+        console.log('[OutboxModel] Tagged users inbox relays:', inboxRelays.length);
 
         // Combine and deduplicate all target relays
         allTargetRelays = [...new Set([...outboxRelays, ...inboxRelays])];
       } else {
-        console.log('[ConsistencyRelay] Event not relevant to user (not authored by or tagging user)');
+        console.log('[OutboxModel] Event not relevant to user (not authored by or tagging user)');
         return;
       }
 
-      // Exclude the consistency relay itself
-      allTargetRelays = this.excludeConsistencyRelay(allTargetRelays);
+      // Exclude relays we're already connected to (no need to broadcast back)
+      allTargetRelays = this.excludeConnectedRelays(allTargetRelays);
 
-      console.log('[ConsistencyRelay] Total target relays (deduplicated):', allTargetRelays);
+      console.log('[OutboxModel] Total target relays (deduplicated):', allTargetRelays.length);
 
       if (allTargetRelays.length === 0) {
-        console.warn('[ConsistencyRelay] No target relays found, cannot broadcast');
+        console.warn('[OutboxModel] No target relays found, cannot broadcast');
         return;
       }
 
       // Broadcast to all target relays
       await this.broadcastToMultipleRelays(allTargetRelays, event);
     } catch (error) {
-      console.error('[ConsistencyRelay] Error broadcasting event:', error);
+      console.error('[OutboxModel] Error broadcasting event:', error);
     }
   }
 
@@ -360,8 +458,6 @@ export class ConsistencyRelayService {
 
   /**
    * Collect read relays for all contacts (used for Profile and Relay List broadcasting)
-   * Uses relay hints from contact list (kind 3) and fetches relay lists (kind 10002)
-   * Collects all relays first to avoid flooding, then returns deduplicated list
    */
   private async collectReadRelaysForContacts(
     contacts: Array<{ pubkey: string; relay?: string }>,
@@ -371,30 +467,28 @@ export class ConsistencyRelayService {
       return [];
     }
 
-    console.log('[ConsistencyRelay] Collecting read relays for', contacts.length, 'contacts...');
+    console.log('[OutboxModel] Collecting read relays for', contacts.length, 'contacts...');
     const readRelaysSet = new Set<string>();
 
-    // First, collect relay hints from the contact list (kind 3 event)
+    // First, collect relay hints from the contact list
     contacts.forEach((contact) => {
       if (contact.relay) {
         readRelaysSet.add(contact.relay);
       }
     });
-    console.log('[ConsistencyRelay] Found', readRelaysSet.size, 'relay hints from contact list');
+    console.log('[OutboxModel] Found', readRelaysSet.size, 'relay hints from contact list');
 
-    // Then, try to fetch relay lists (kind 10002) for all contacts in parallel
+    // Then, fetch relay lists for all contacts in parallel
     const relayListPromises = contacts.map(async (contact) => {
       try {
-        // Fetch relay list (uses local cache and network fetch)
         const relayMetadata = await relayListManager.fetchRelayList(contact.pubkey);
-        // Get read relays
         const readRelays = relayMetadata
           .filter((r) => r.type === 'read' || r.type === 'both')
           .map((r) => r.url);
         return readRelays;
       } catch (error) {
         console.warn(
-          '[ConsistencyRelay] Failed to fetch relay list for contact',
+          '[OutboxModel] Failed to fetch relay list for contact',
           contact.pubkey.substring(0, 8),
           ':',
           error
@@ -403,7 +497,6 @@ export class ConsistencyRelayService {
       }
     });
 
-    // Wait for all relay lists to be collected before broadcasting
     const allReadRelays = await Promise.all(relayListPromises);
 
     // Flatten and deduplicate
@@ -412,13 +505,13 @@ export class ConsistencyRelayService {
     });
 
     const uniqueRelays = Array.from(readRelaysSet);
-    console.log('[ConsistencyRelay] Deduplicated to', uniqueRelays.length, 'unique read relays');
+    console.log('[OutboxModel] Deduplicated to', uniqueRelays.length, 'unique read relays');
 
     return uniqueRelays;
   }
 
   /**
-   * Collect inbox relays for tagged pubkeys
+   * Collect read relays (inbox) for tagged pubkeys
    */
   private async collectInboxRelays(
     pubkeys: string[],
@@ -430,19 +523,16 @@ export class ConsistencyRelayService {
 
     const inboxRelaysSet = new Set<string>();
 
-    // Fetch relay lists for tagged pubkeys in parallel
     const relayListPromises = pubkeys.map(async (pubkey) => {
       try {
-        // Fetch relay list (uses local cache and network fetch)
         const relayMetadata = await relayListManager.fetchRelayList(pubkey);
-        // Get read relays (inbox)
         const readRelays = relayMetadata
           .filter((r) => r.type === 'read' || r.type === 'both')
           .map((r) => r.url);
         return readRelays;
       } catch (error) {
         console.warn(
-          '[ConsistencyRelay] Failed to fetch relay list for',
+          '[OutboxModel] Failed to fetch relay list for',
           pubkey.substring(0, 8),
           ':',
           error
@@ -463,7 +553,6 @@ export class ConsistencyRelayService {
 
   /**
    * Check if an event has already been broadcast
-   * Returns true if the event ID is in the broadcast history
    */
   private async hasBeenBroadcast(eventId: string): Promise<boolean> {
     try {
@@ -473,14 +562,13 @@ export class ConsistencyRelayService {
       
       return history.includes(eventId);
     } catch (error) {
-      console.error('[ConsistencyRelay] Error checking broadcast history:', error);
+      console.error('[OutboxModel] Error checking broadcast history:', error);
       return false;
     }
   }
 
   /**
-   * Mark an event as broadcast by adding its ID to the history
-   * Maintains a rolling history of the last 1000 broadcast event IDs
+   * Mark an event as broadcast
    */
   private async markAsBroadcast(eventId: string): Promise<void> {
     try {
@@ -488,43 +576,39 @@ export class ConsistencyRelayService {
       const result = await chrome.storage.local.get(key);
       const history: string[] = result[key] || [];
       
-      // Add the event ID if it's not already in the history
       if (!history.includes(eventId)) {
         history.unshift(eventId);
         
-        // Keep only the last 1000 event IDs to avoid storage bloat
+        // Keep only the last 1000 event IDs
         if (history.length > 1000) {
           history.splice(1000);
         }
         
         await chrome.storage.local.set({ [key]: history });
-        console.log('[ConsistencyRelay] Marked event', eventId.substring(0, 8), 'as broadcast');
+        console.log('[OutboxModel] Marked event', eventId.substring(0, 8), 'as broadcast');
       }
     } catch (error) {
-      console.error('[ConsistencyRelay] Error marking event as broadcast:', error);
+      console.error('[OutboxModel] Error marking event as broadcast:', error);
     }
   }
 
   /**
-   * Exclude consistency relay from target list
+   * Exclude connected relays from broadcast targets (no need to send back to source)
    */
-  private excludeConsistencyRelay(relays: string[]): string[] {
-    if (!this.url) {
-      return relays;
-    }
-
+  private excludeConnectedRelays(relays: string[]): string[] {
+    const connectedUrls = Array.from(this.connections.keys());
     const beforeCount = relays.length;
-    const filtered = relays.filter((url) => url !== this.url);
+    const filtered = relays.filter((url) => !connectedUrls.includes(url));
     
     if (beforeCount !== filtered.length) {
-      console.log('[ConsistencyRelay] Excluded consistency relay from broadcast targets');
+      console.log('[OutboxModel] Excluded', beforeCount - filtered.length, 'connected relays from broadcast targets');
     }
     
     return filtered;
   }
 
   /**
-   * Broadcast to multiple relays and log results
+   * Broadcast to multiple relays
    */
   private async broadcastToMultipleRelays(
     relays: string[],
@@ -548,33 +632,33 @@ export class ConsistencyRelayService {
           successCount++;
           if (response.duplicate) {
             duplicateCount++;
-            console.log(`[ConsistencyRelay] ℹ ${relayUrl} already had the event`);
+            console.log(`[OutboxModel] ℹ ${relayUrl} already had the event`);
           }
         } else {
-          console.log(`[ConsistencyRelay] ℹ ${relayUrl} failed with ${result.status}: ${JSON.stringify(result.value)}`);
+          console.log(`[OutboxModel] ℹ ${relayUrl} failed: ${JSON.stringify(response.message)}`);
           failureCount++;
         }
       } else {
         failureCount++;
         console.error(
-          `[ConsistencyRelay] ✗ Failed to broadcast to ${relayUrl}:`,
+          `[OutboxModel] ✗ Failed to broadcast to ${relayUrl}:`,
           result.reason
         );
       }
     });
 
     console.log(
-      `[ConsistencyRelay] Broadcast complete: ${successCount} succeeded, ${duplicateCount} duplicates, ${failureCount} failed`
+      `[OutboxModel] Broadcast complete: ${successCount} succeeded, ${duplicateCount} duplicates, ${failureCount} failed`
     );
 
-    // Mark event as broadcast if at least one relay accepted it (excluding duplicates)
+    // Mark event as broadcast if at least one relay accepted it
     if (successCount > 0) {
       await this.markAsBroadcast(event.id);
     }
   }
 
   /**
-   * Broadcast event to a single relay and capture the OK response
+   * Broadcast event to a single relay
    */
   private async broadcastToSingleRelay(
     relayUrl: string,
@@ -596,7 +680,6 @@ export class ConsistencyRelayService {
       }
 
       ws.onopen = () => {
-        // Send EVENT message
         const eventMessage = JSON.stringify(['EVENT', event]);
         ws.send(eventMessage);
       };
@@ -606,13 +689,11 @@ export class ConsistencyRelayService {
           const data = JSON.parse(msg.data);
           const [type, eventId, accepted, message] = data;
 
-          // NIP-20: OK messages
           if (type === 'OK' && eventId === event.id) {
             clearTimeout(timeout);
             ws.close();
 
             if (accepted) {
-              // Check if the message indicates the event already existed
               const isDuplicate =
                 message &&
                 (message.toLowerCase().includes('duplicate') ||
@@ -624,7 +705,7 @@ export class ConsistencyRelayService {
                 message: JSON.stringify(message) || undefined,
               });
             } else {
-              console.warn(`[ConsistencyRelay] ${relayUrl} rejected event:`, JSON.stringify(message));
+              console.warn(`[OutboxModel] ${relayUrl} rejected event:`, JSON.stringify(message));
               resolve({
                 success: false,
                 duplicate: false,
@@ -633,7 +714,7 @@ export class ConsistencyRelayService {
             }
           }
         } catch (error) {
-          console.error(`[ConsistencyRelay] Error parsing message from ${relayUrl}:`, error);
+          console.error(`[OutboxModel] Error parsing message from ${relayUrl}:`, error);
         }
       };
 
@@ -644,7 +725,6 @@ export class ConsistencyRelayService {
 
       ws.onclose = () => {
         clearTimeout(timeout);
-        // If we haven't resolved yet, it means we didn't get an OK response
         resolve({ success: false, duplicate: false, message: 'Connection closed without response' });
       };
     });
