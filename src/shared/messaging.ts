@@ -10,21 +10,14 @@ export enum MessageType {
   PING = 'PING',
   
   // Nostr operations
-  CONNECT_NIP07 = 'CONNECT_NIP07',
-  NIP07_LOGIN = 'NIP07_LOGIN',
+  SIMPLE_LOGIN = 'SIMPLE_LOGIN',
   FETCH_USER_DATA = 'FETCH_USER_DATA',
   FETCH_CONTACTS = 'FETCH_CONTACTS',
-  REMOVE_CONTACT = 'REMOVE_CONTACT',
-  ADD_CONTACT = 'ADD_CONTACT',
   LOGOUT = 'LOGOUT',
   GET_LOGIN_STATUS = 'GET_LOGIN_STATUS',
   
   // Relay management (NIP-65)
   FETCH_RELAYS = 'FETCH_RELAYS',
-  ADD_RELAY = 'ADD_RELAY',
-  REMOVE_RELAY = 'REMOVE_RELAY',
-  UPDATE_RELAY_TYPE = 'UPDATE_RELAY_TYPE',
-  PUBLISH_RELAY_LIST = 'PUBLISH_RELAY_LIST',
   
   // Refresh all data (profile, contacts, relays)
   REFRESH_DATA = 'REFRESH_DATA',
@@ -39,6 +32,7 @@ export enum MessageType {
   GET_INBOX_SCANNER_STATUS = 'GET_INBOX_SCANNER_STATUS',
   GET_INBOX_SCANNER_EVENTS = 'GET_INBOX_SCANNER_EVENTS',
   TRIGGER_INBOX_SCAN = 'TRIGGER_INBOX_SCAN',
+  STOP_INBOX_SCAN = 'STOP_INBOX_SCAN',
   TOGGLE_INBOX_SCANNER = 'TOGGLE_INBOX_SCANNER',
 }
 
@@ -55,10 +49,33 @@ export interface MessageResponse {
 
 /**
  * Send a message to the background script
+ * Uses Promise-based approach for Firefox compatibility
  */
 export async function sendToBackground(message: Message): Promise<MessageResponse> {
   try {
-    const response = await chrome.runtime.sendMessage(message);
+    // Firefox-compatible: wrap chrome.runtime.sendMessage in a Promise
+    const response = await new Promise<MessageResponse>((resolve, reject) => {
+      chrome.runtime.sendMessage(message, (response) => {
+        // Check for runtime errors
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        
+        // Handle undefined response (Firefox issue)
+        if (!response) {
+          console.warn('Received undefined response from background script');
+          resolve({
+            success: false,
+            error: 'No response from background script',
+          });
+          return;
+        }
+        
+        resolve(response);
+      });
+    });
+    
     return response;
   } catch (error) {
     console.error('Error sending message to background:', error);

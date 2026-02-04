@@ -4,8 +4,8 @@
   import { MessageType } from "../shared/messaging";
   import type { UserData, StoredContact } from "../services/db";
   import { nip19 } from "nostr-tools";
-  import { X, UserPlus, User, ExternalLink, Check, Loader } from 'lucide-svelte';
-  import { filterContacts, parseContactIdentifier } from './contactUtils';
+  import { X, User, ExternalLink } from 'lucide-svelte';
+  import { filterContacts } from './contactUtils';
   import { formatPubkey } from '../shared/formatters';
   import './contacts.css';
 
@@ -17,9 +17,6 @@
   let isFetchingContacts = false;
   let searchTerm = "";
   let filteredContacts: StoredContact[] = [];
-  let showAddContactForm = false;
-  let newContactIdentifier = "";
-  let isAddingContact = false;
 
   function updateFilteredContacts() {
     filteredContacts = filterContacts(contacts, searchTerm);
@@ -92,108 +89,6 @@
     }
   }
 
-  async function refreshUserData() {
-    isLoading = true;
-    error = "";
-    try {
-      const response = await sendToBackground({
-        type: MessageType.FETCH_USER_DATA,
-      });
-
-      if (response.success) {
-        userData = response.data;
-        await fetchContacts();
-      } else {
-        throw new Error(response.error || "Failed to refresh data");
-      }
-    } catch (err) {
-      console.error("Error refreshing data:", err);
-      error = err instanceof Error ? err.message : "Failed to refresh data";
-    } finally {
-      isLoading = false;
-    }
-  }
-
-  async function removeContact(pubkey: string) {
-    if (
-      !confirm(
-        "Are you sure you want to remove this contact? This will publish a new contact list to the relays.",
-      )
-    ) {
-      return;
-    }
-
-    isLoading = true;
-    error = "";
-    try {
-      const response = await sendToBackground({
-        type: MessageType.REMOVE_CONTACT,
-        payload: { pubkey },
-      });
-
-      if (response.success) {
-        // Immediately update the local state by filtering out the removed contact
-        contacts = contacts.filter(c => c.pubkey !== pubkey);
-        updateFilteredContacts();
-        
-        // Also fetch fresh data from the background to ensure consistency
-        await fetchContacts();
-      } else {
-        throw new Error(response.error || "Failed to remove contact");
-      }
-    } catch (err) {
-      console.error("Error removing contact:", err);
-      error = err instanceof Error ? err.message : "Failed to remove contact";
-      // Restore the contacts list on error by re-fetching
-      await fetchContacts();
-    } finally {
-      isLoading = false;
-    }
-  }
-
-  async function addContact() {
-    const parsed = parseContactIdentifier(newContactIdentifier);
-    if (parsed.error) {
-      error = parsed.error;
-      return;
-    }
-
-    isAddingContact = true;
-    error = "";
-    
-    try {
-      const pubkey = parsed.pubkey!;
-      
-      const response = await sendToBackground({
-        type: MessageType.ADD_CONTACT,
-        payload: {
-          identifier: pubkey,
-        },
-      });
-
-      if (response.success) {
-        // Reset form
-        newContactIdentifier = "";
-        showAddContactForm = false;
-        
-        // Refresh contacts list
-        await fetchContacts();
-      } else {
-        throw new Error(response.error || "Failed to add contact");
-      }
-    } catch (err) {
-      console.error("Error adding contact:", err);
-      error = err instanceof Error ? err.message : "Failed to add contact";
-    } finally {
-      isAddingContact = false;
-    }
-  }
-
-  function cancelAddContact() {
-    showAddContactForm = false;
-    newContactIdentifier = "";
-    error = "";
-  }
 </script>
 
 <div class="page-view">
@@ -208,7 +103,7 @@
     <div class="login-container">
       <p class="info">You need to be logged in to view your contacts.</p>
       <p class="info-small">
-        Please open the extension popup and login with your NIP-07 extension.
+        Please open the extension popup and login with your npub, pubkey, or NIP-05 address.
       </p>
     </div>
   {:else}
@@ -221,51 +116,7 @@
           bind:value={searchTerm}
           on:input={updateFilteredContacts}
         />
-        <button
-          class={showAddContactForm ? "btn-cancel" : "btn-success"}
-          on:click={() => showAddContactForm = !showAddContactForm}
-          disabled={isLoading || isAddingContact}
-        >
-          {#if showAddContactForm}
-            <X size={16} /> Cancel
-          {:else}
-            <UserPlus size={16} /> Add Contact
-          {/if}
-        </button>
       </div>
-
-      {#if showAddContactForm}
-        <div class="form-container">
-          <h3>Add New Contact</h3>
-          <p class="form-help">
-            Enter a pubkey (hex), npub, or NIP-05 address (e.g., user@domain.com)
-          </p>
-          <div class="form-group">
-            <label for="contact-identifier">Pubkey / Npub / NIP-05</label>
-            <input
-              id="contact-identifier"
-              type="text"
-              class="form-input"
-              placeholder="npub1... or user@domain.com or hex pubkey"
-              bind:value={newContactIdentifier}
-              disabled={isAddingContact}
-            />
-          </div>
-          <div class="form-actions">
-            <button
-              class="btn-primary"
-              on:click={addContact}
-              disabled={isAddingContact || !newContactIdentifier.trim()}
-            >
-              {#if isAddingContact}
-                <Loader size={16} class="spin" /> Adding...
-              {:else}
-                <Check size={16} /> Add Contact
-              {/if}
-            </button>
-          </div>
-        </div>
-      {/if}
 
       {#if isFetchingContacts}
         <div class="loading">Loading contacts...</div>
@@ -303,14 +154,6 @@
                 </div>
               </div>
               <div class="contact-actions">
-                <button
-                  class="btn-remove"
-                  on:click={() => removeContact(contact.pubkey)}
-                  disabled={isLoading}
-                  title="Remove contact"
-                >
-                  <X size={16} />
-                </button>
                 <button
                   class="btn-small"
                   on:click={() => window.open(`https://njump.me/${nip19.npubEncode(contact.pubkey)}`, '_blank')}

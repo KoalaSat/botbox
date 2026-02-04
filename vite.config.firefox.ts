@@ -2,7 +2,7 @@ import { defineConfig } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 import { resolve } from 'path'
 
-// https://vite.dev/config/
+// Firefox-specific config - bundles everything inline to avoid module issues
 export default defineConfig({
   plugins: [svelte()],
   base: './', // Use relative paths for browser extension
@@ -25,12 +25,22 @@ export default defineConfig({
         },
         chunkFileNames: 'assets/[name]-[hash].js',
         assetFileNames: 'assets/[name]-[hash].[ext]',
-        format: 'es', // Use ES modules format
-        // Prevent code splitting for background and content scripts
-        manualChunks: undefined,
+        // Use ES modules but inline everything for background/content
+        format: 'es',
+        // Inline all dynamic imports for background and content scripts
+        inlineDynamicImports: false,
+        manualChunks: (id) => {
+          // Keep background script dependencies bundled together
+          if (id.includes('src/background/') || 
+              (id.includes('src/services/') && !id.includes('node_modules')) ||
+              (id.includes('src/shared/') && !id.includes('node_modules'))) {
+            return undefined; // Bundle with entry point
+          }
+          return undefined;
+        },
       },
     },
-    outDir: 'dist-chrome',
+    outDir: 'dist-firefox',
     emptyOutDir: true,
     target: 'esnext',
     minify: false,

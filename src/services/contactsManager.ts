@@ -5,7 +5,6 @@
 import type { Event as NostrEvent } from 'nostr-tools';
 import { RelayManager } from './relayManager';
 import { Database, type NostrContact } from './db';
-import { Nip07TabService } from './nip07Tab';
 
 export class ContactsManager {
   private relayManager: RelayManager;
@@ -95,96 +94,6 @@ export class ContactsManager {
       // Return empty array, this is not critical - we have default relays
       return [];
     }
-  }
-
-  /**
-   * Create a new contact list event (unsigned)
-   */
-  createContactListEvent(contacts: NostrContact[]): any {
-    const tags: string[][] = contacts.map(contact => {
-      const tag = ['p', contact.pubkey];
-      if (contact.relay) {
-        tag.push(contact.relay);
-      }
-      if (contact.petname) {
-        // Ensure we have relay field (empty string) if we have petname
-        if (!contact.relay) {
-          tag.push('');
-        }
-        tag.push(contact.petname);
-      }
-      return tag;
-    });
-
-    return {
-      kind: 3,
-      created_at: Math.floor(Date.now() / 1000),
-      tags,
-      content: '',
-    };
-  }
-
-  /**
-   * Publish a new contact list
-   */
-  async publishContacts(contacts: NostrContact[]): Promise<void> {
-    // Create unsigned event
-    const unsignedEvent = this.createContactListEvent(contacts);
-
-    console.log('[ContactsManager] Unsigned event created:', unsignedEvent);
-
-    // Sign with NIP-07
-    const signedEvent = await Nip07TabService.signEvent(unsignedEvent);
-
-    console.log('[ContactsManager] Signed event:', signedEvent);
-
-    if (!signedEvent) {
-      throw new Error('Failed to sign event. Please make sure your Nostr extension is unlocked and try again.');
-    }
-
-    // Publish to relays
-    await this.relayManager.publish(signedEvent as any);
-
-    // Update database
-    await Database.updateUserContacts(contacts);
-  }
-
-  /**
-   * Remove a contact and publish updated list
-   */
-  async removeContact(pubkey: string): Promise<void> {
-    const userData = await Database.getUserData();
-    if (!userData) {
-      throw new Error('User not logged in');
-    }
-
-    // Remove contact from list
-    const updatedContacts = userData.contacts.filter(c => c.pubkey !== pubkey);
-
-    // Publish updated list
-    await this.publishContacts(updatedContacts);
-  }
-
-  /**
-   * Add a contact and publish updated list
-   */
-  async addContact(contact: NostrContact): Promise<void> {
-    const userData = await Database.getUserData();
-    if (!userData) {
-      throw new Error('User not logged in');
-    }
-
-    // Check if contact already exists
-    const exists = userData.contacts.some(c => c.pubkey === contact.pubkey);
-    if (exists) {
-      throw new Error('Contact already exists');
-    }
-
-    // Add contact to list
-    const updatedContacts = [...userData.contacts, contact];
-
-    // Publish updated list
-    await this.publishContacts(updatedContacts);
   }
 
   /**

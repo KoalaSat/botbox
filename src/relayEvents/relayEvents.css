@@ -430,7 +430,6 @@
 
 /* Relay Info Section */
 .relay-info {
-  padding: 16px;
   display: flex;
   flex-direction: column;
   gap: 16px;

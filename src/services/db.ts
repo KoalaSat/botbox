@@ -64,15 +64,43 @@ export class Database {
    * Get user data
    */
   static async getUserData(): Promise<UserData | null> {
-    const result = await chrome.storage.local.get(STORAGE_KEYS.USER_DATA);
-    return result[STORAGE_KEYS.USER_DATA] || null;
+    try {
+      // Firefox-compatible: wrap chrome.storage.local.get in a Promise
+      const result = await new Promise<any>((resolve, reject) => {
+        chrome.storage.local.get(STORAGE_KEYS.USER_DATA, (result) => {
+          if (chrome.runtime.lastError) {
+            reject(chrome.runtime.lastError);
+            return;
+          }
+          resolve(result);
+        });
+      });
+      
+      // Handle both Chrome and Firefox API response formats
+      if (!result || typeof result !== 'object') {
+        return null;
+      }
+      return result[STORAGE_KEYS.USER_DATA] || null;
+    } catch (error) {
+      console.error('[Database] Error getting user data:', error);
+      return null;
+    }
   }
 
   /**
    * Set user data
    */
   static async setUserData(userData: UserData): Promise<void> {
-    await chrome.storage.local.set({ [STORAGE_KEYS.USER_DATA]: userData });
+    // Firefox-compatible: wrap chrome.storage.local.set in a Promise
+    await new Promise<void>((resolve, reject) => {
+      chrome.storage.local.set({ [STORAGE_KEYS.USER_DATA]: userData }, () => {
+        if (chrome.runtime.lastError) {
+          reject(chrome.runtime.lastError);
+          return;
+        }
+        resolve();
+      });
+    });
   }
 
   /**
@@ -135,8 +163,26 @@ export class Database {
    * Get contact profiles (cached)
    */
   static async getContactProfiles(): Promise<Record<string, NostrProfile>> {
-    const result = await chrome.storage.local.get(STORAGE_KEYS.CONTACT_PROFILES);
-    return result[STORAGE_KEYS.CONTACT_PROFILES] || {};
+    try {
+      // Firefox-compatible: wrap chrome.storage.local.get in a Promise
+      const result = await new Promise<any>((resolve, reject) => {
+        chrome.storage.local.get(STORAGE_KEYS.CONTACT_PROFILES, (result) => {
+          if (chrome.runtime.lastError) {
+            reject(chrome.runtime.lastError);
+            return;
+          }
+          resolve(result);
+        });
+      });
+      
+      if (!result || typeof result !== 'object') {
+        return {};
+      }
+      return result[STORAGE_KEYS.CONTACT_PROFILES] || {};
+    } catch (error) {
+      console.error('[Database] Error getting contact profiles:', error);
+      return {};
+    }
   }
 
   /**
@@ -145,7 +191,16 @@ export class Database {
   static async setContactProfile(pubkey: string, profile: NostrProfile): Promise<void> {
     const profiles = await this.getContactProfiles();
     profiles[pubkey] = profile;
-    await chrome.storage.local.set({ [STORAGE_KEYS.CONTACT_PROFILES]: profiles });
+    // Firefox-compatible: wrap chrome.storage.local.set in a Promise
+    await new Promise<void>((resolve, reject) => {
+      chrome.storage.local.set({ [STORAGE_KEYS.CONTACT_PROFILES]: profiles }, () => {
+        if (chrome.runtime.lastError) {
+          reject(chrome.runtime.lastError);
+          return;
+        }
+        resolve();
+      });
+    });
   }
 
   /**
@@ -154,7 +209,16 @@ export class Database {
   static async setContactProfiles(profiles: Record<string, NostrProfile>): Promise<void> {
     const existing = await this.getContactProfiles();
     const merged = { ...existing, ...profiles };
-    await chrome.storage.local.set({ [STORAGE_KEYS.CONTACT_PROFILES]: merged });
+    // Firefox-compatible: wrap chrome.storage.local.set in a Promise
+    await new Promise<void>((resolve, reject) => {
+      chrome.storage.local.set({ [STORAGE_KEYS.CONTACT_PROFILES]: merged }, () => {
+        if (chrome.runtime.lastError) {
+          reject(chrome.runtime.lastError);
+          return;
+        }
+        resolve();
+      });
+    });
   }
 
   /**
@@ -188,8 +252,17 @@ export class Database {
    * Clear all data including user data, cached relay lists, and broadcast history
    */
   static async clear(): Promise<void> {
-    // Get all keys from storage
-    const allData = await chrome.storage.local.get(null);
+    // Get all keys from storage - Firefox-compatible
+    const allData = await new Promise<any>((resolve, reject) => {
+      chrome.storage.local.get(null, (result) => {
+        if (chrome.runtime.lastError) {
+          reject(chrome.runtime.lastError);
+          return;
+        }
+        resolve(result);
+      });
+    });
+    
     const keys = Object.keys(allData);
     
     // Find all keys that need to be removed
@@ -209,9 +282,17 @@ export class Database {
     
     console.log('[Database] Clearing', keysToRemove.length, 'keys from storage');
     
-    // Remove all identified keys
+    // Remove all identified keys - Firefox-compatible
     if (keysToRemove.length > 0) {
-      await chrome.storage.local.remove(keysToRemove);
+      await new Promise<void>((resolve, reject) => {
+        chrome.storage.local.remove(keysToRemove, () => {
+          if (chrome.runtime.lastError) {
+            reject(chrome.runtime.lastError);
+            return;
+          }
+          resolve();
+        });
+      });
     }
   }
 

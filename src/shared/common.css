@@ -44,6 +44,17 @@
   box-sizing: border-box;
 }
 
+/* Hide scrollbars globally to prevent layout shift */
+html {
+  overflow-y: scroll;
+  -ms-overflow-style: none;  /* IE and Edge */
+  scrollbar-width: none;  /* Firefox */
+}
+
+html::-webkit-scrollbar {
+  display: none;
+}
+
 body {
   margin: 0;
   padding: 0;
@@ -51,12 +62,17 @@ body {
   min-width: 400px;
   max-width: 400px;
   background: var(--bg-color);
+  overflow-y: auto;
+  -ms-overflow-style: none;  /* IE and Edge */
+  scrollbar-width: none;  /* Firefox */
+}
+
+body::-webkit-scrollbar {
+  display: none;
 }
 
 main {
   width: 100%;
-  min-height: 500px;
-  max-height: 600px;
   overflow-y: auto;
   -ms-overflow-style: none;  /* IE and Edge */
   scrollbar-width: none;  /* Firefox */
@@ -64,6 +80,16 @@ main {
 
 main::-webkit-scrollbar {
   display: none;
+}
+
+/* Hide scrollbars for all scrollable elements */
+* {
+  scrollbar-width: none;  /* Firefox */
+  -ms-overflow-style: none;  /* IE and Edge */
+}
+
+*::-webkit-scrollbar {
+  display: none;  /* Chrome, Safari, Opera */
 }
 
 #app {

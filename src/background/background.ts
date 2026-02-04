@@ -8,7 +8,6 @@ import { ContactsManager } from '../services/contactsManager';
 import { ProfileManager } from '../services/profileManager';
 import { RelayListManager } from '../services/relayListManager';
 import { Database, type UserData, type RelayMetadata } from '../services/db';
-import { Nip07TabService } from '../services/nip07Tab';
 import { fetchRelayInfoBatch } from '../services/nip11';
 import { OutboxModelService } from '../services/outboxModel';
 import { InboxScannerService } from '../services/inboxScanner';
@@ -19,51 +18,11 @@ import {
   handleAsyncVoidWithPayload,
 } from './messageHandler';
 import type { Event as NostrEvent } from 'nostr-tools';
+import { MessageType } from '../shared/messaging';
 
 // =============================================================================
 // Types and Enums
 // =============================================================================
-
-enum MessageType {
-  PING = 'PING',
-  GET_DATA = 'GET_DATA',
-  SET_DATA = 'SET_DATA',
-  NOTIFY = 'NOTIFY',
-  
-  // Authentication
-  CONNECT_NIP07 = 'CONNECT_NIP07',
-  NIP07_LOGIN = 'NIP07_LOGIN',
-  LOGOUT = 'LOGOUT',
-  GET_LOGIN_STATUS = 'GET_LOGIN_STATUS',
-  
-  // User Data
-  FETCH_USER_DATA = 'FETCH_USER_DATA',
-  REFRESH_DATA = 'REFRESH_DATA',
-  
-  // Contacts
-  FETCH_CONTACTS = 'FETCH_CONTACTS',
-  REMOVE_CONTACT = 'REMOVE_CONTACT',
-  ADD_CONTACT = 'ADD_CONTACT',
-  
-  // Relay Management (NIP-65)
-  FETCH_RELAYS = 'FETCH_RELAYS',
-  ADD_RELAY = 'ADD_RELAY',
-  REMOVE_RELAY = 'REMOVE_RELAY',
-  UPDATE_RELAY_TYPE = 'UPDATE_RELAY_TYPE',
-  PUBLISH_RELAY_LIST = 'PUBLISH_RELAY_LIST',
-  
-  // Outbox Model
-  GET_OUTBOX_MODEL_EVENTS = 'GET_OUTBOX_MODEL_EVENTS',
-  GET_OUTBOX_MODEL_STATUS = 'GET_OUTBOX_MODEL_STATUS',
-  CONNECT_OUTBOX_MODEL = 'CONNECT_OUTBOX_MODEL',
-  DISCONNECT_OUTBOX_MODEL = 'DISCONNECT_OUTBOX_MODEL',
-  
-  // Inbox Scanner
-  GET_INBOX_SCANNER_STATUS = 'GET_INBOX_SCANNER_STATUS',
-  GET_INBOX_SCANNER_EVENTS = 'GET_INBOX_SCANNER_EVENTS',
-  TRIGGER_INBOX_SCAN = 'TRIGGER_INBOX_SCAN',
-  TOGGLE_INBOX_SCANNER = 'TOGGLE_INBOX_SCANNER',
-}
 
 interface Message {
   type: MessageType;
@@ -180,104 +139,140 @@ Database.getUserData().then(userData => {
 
 /**
  * Listen for messages from popup or content scripts
+ * Firefox-compatible version that returns Promises
  */
 chrome.runtime.onMessage.addListener(
   (message: Message, sender, sendResponse: (response: MessageResponse) => void) => {
-    console.log('Background received message:', message, 'from:', sender);
+    // Handle message and return promise for Firefox compatibility
+    const handleMessage = async (): Promise<MessageResponse> => {
+      try {
+        switch (message.type) {
+          // Simple sync responses
+          case MessageType.PING:
+            return { success: true, data: 'pong' };
 
-    switch (message.type) {
-      // Simple sync responses
-      case MessageType.PING:
-        sendResponse({ success: true, data: 'pong' });
-        break;
+          case MessageType.NOTIFY:
+            console.log('Notification:', message.payload);
+            return { success: true };
 
-      case MessageType.NOTIFY:
-        console.log('Notification:', message.payload);
-        sendResponse({ success: true });
-        break;
+          // Authentication handlers
+          case MessageType.GET_LOGIN_STATUS: {
+            const data = await handleGetLoginStatus();
+            return { success: true, data };
+          }
 
-      // Authentication handlers
-      case MessageType.GET_LOGIN_STATUS:
-        return handleAsync(handleGetLoginStatus, sendResponse);
+          case MessageType.SIMPLE_LOGIN: {
+            const data = await handleSimpleLogin(message.payload);
+            return { success: true, data };
+          }
 
-      case MessageType.CONNECT_NIP07:
-        return handleAsync(handleConnectNip07, sendResponse);
+          case MessageType.LOGOUT:
+            await handleLogout();
+            return { success: true };
 
-      case MessageType.NIP07_LOGIN:
-        return handleAsyncWithPayload(handleNip07Login, message.payload, sendResponse);
+          // User data handlers
+          case MessageType.FETCH_USER_DATA: {
+            const data = await handleFetchUserData();
+            return { success: true, data };
+          }
 
-      case MessageType.LOGOUT:
-        return handleAsyncVoid(handleLogout, sendResponse);
+          case MessageType.REFRESH_DATA: {
+            const data = await handleRefreshData();
+            return { success: true, data };
+          }
 
-      // User data handlers
-      case MessageType.FETCH_USER_DATA:
-        return handleAsync(handleFetchUserData, sendResponse);
+          // Contact handlers
+          case MessageType.FETCH_CONTACTS: {
+            const data = await handleFetchContacts();
+            return { success: true, data };
+          }
 
-      case MessageType.REFRESH_DATA:
-        return handleAsync(handleRefreshData, sendResponse);
+          // Relay management handlers
+          case MessageType.FETCH_RELAYS: {
+            const data = await handleFetchRelays();
+            return { success: true, data };
+          }
 
-      // Contact handlers
-      case MessageType.FETCH_CONTACTS:
-        return handleAsync(handleFetchContacts, sendResponse);
+          // Outbox model handlers
+          case MessageType.GET_OUTBOX_MODEL_EVENTS: {
+            const data = await handleGetOutboxModelEvents();
+            return { success: true, data };
+          }
 
-      case MessageType.REMOVE_CONTACT:
-        return handleAsyncVoidWithPayload(handleRemoveContact, message.payload, sendResponse);
+          case MessageType.GET_OUTBOX_MODEL_STATUS: {
+            const data = await handleGetOutboxModelStatus();
+            return { success: true, data };
+          }
 
-      case MessageType.ADD_CONTACT:
-        return handleAsyncVoidWithPayload(handleAddContact, message.payload, sendResponse);
+          case MessageType.CONNECT_OUTBOX_MODEL:
+            await handleConnectOutboxModel();
+            return { success: true };
 
-      // Relay management handlers
-      case MessageType.FETCH_RELAYS:
-        return handleAsync(handleFetchRelays, sendResponse);
+          case MessageType.DISCONNECT_OUTBOX_MODEL:
+            await handleDisconnectOutboxModel();
+            return { success: true };
 
-      case MessageType.ADD_RELAY:
-        return handleAsyncWithPayload(handleAddRelay, message.payload, sendResponse);
+          // Inbox scanner handlers
+          case MessageType.GET_INBOX_SCANNER_STATUS: {
+            const data = await handleGetInboxScannerStatus();
+            return { success: true, data };
+          }
 
-      case MessageType.REMOVE_RELAY:
-        return handleAsyncWithPayload(handleRemoveRelay, message.payload, sendResponse);
+          case MessageType.GET_INBOX_SCANNER_EVENTS: {
+            const data = await handleGetInboxScannerEvents();
+            return { success: true, data };
+          }
 
-      case MessageType.UPDATE_RELAY_TYPE:
-        return handleAsyncWithPayload(handleUpdateRelayType, message.payload, sendResponse);
+          case MessageType.TRIGGER_INBOX_SCAN: {
+            const data = await handleTriggerInboxScan();
+            return { success: true, data };
+          }
 
-      case MessageType.PUBLISH_RELAY_LIST:
-        return handleAsyncVoid(handlePublishRelayList, sendResponse);
+          case MessageType.STOP_INBOX_SCAN:
+            await handleStopInboxScan();
+            return { success: true };
 
-      // Outbox model handlers
-      case MessageType.GET_OUTBOX_MODEL_EVENTS:
-        return handleAsync(handleGetOutboxModelEvents, sendResponse);
+          case MessageType.TOGGLE_INBOX_SCANNER: {
+            const data = await handleToggleInboxScanner();
+            return { success: true, data };
+          }
 
-      case MessageType.GET_OUTBOX_MODEL_STATUS:
-        return handleAsync(handleGetOutboxModelStatus, sendResponse);
+          // Storage handlers
+          case MessageType.GET_DATA: {
+            const data = await handleGetData(message.payload);
+            return { success: true, data };
+          }
 
-      case MessageType.CONNECT_OUTBOX_MODEL:
-        return handleAsyncVoid(handleConnectOutboxModel, sendResponse);
+          case MessageType.SET_DATA:
+            await handleSetData(message.payload);
+            return { success: true };
 
-      case MessageType.DISCONNECT_OUTBOX_MODEL:
-        return handleAsyncVoid(handleDisconnectOutboxModel, sendResponse);
+          default:
+            return { success: false, error: 'Unknown message type' };
+        }
+      } catch (error) {
+        return { 
+          success: false, 
+          error: error instanceof Error ? error.message : 'Unknown error' 
+        };
+      }
+    };
 
-      // Inbox scanner handlers
-      case MessageType.GET_INBOX_SCANNER_STATUS:
-        return handleAsync(handleGetInboxScannerStatus, sendResponse);
+    // Execute handler and send response
+    handleMessage()
+      .then(response => {
+        sendResponse(response);
+      })
+      .catch(error => {
+        console.error('Error handling message:', error);
+        sendResponse({ 
+          success: false, 
+          error: error instanceof Error ? error.message : 'Unknown error' 
+        });
+      });
 
-      case MessageType.GET_INBOX_SCANNER_EVENTS:
-        return handleAsync(handleGetInboxScannerEvents, sendResponse);
-
-      case MessageType.TRIGGER_INBOX_SCAN:
-        return handleAsync(handleTriggerInboxScan, sendResponse);
-
-      case MessageType.TOGGLE_INBOX_SCANNER:
-        return handleAsync(handleToggleInboxScanner, sendResponse);
-
-      // Storage handlers
-      case MessageType.GET_DATA:
-        return handleAsyncWithPayload(handleGetData, message.payload, sendResponse);
-
-      case MessageType.SET_DATA:
-        return handleAsyncVoidWithPayload(handleSetData, message.payload, sendResponse);
-
-      default:
-        sendResponse({ success: false, error: 'Unknown message type' });
-    }
+    // Return true to indicate async response
+    return true;
   }
 );
 
@@ -295,69 +290,50 @@ async function handleGetLoginStatus(): Promise<{ isLoggedIn: boolean; userData: 
 }
 
 /**
- * Handle NIP-07 connection via tab injection
+ * Handle simple login with npub, pubkey, or NIP-05
  */
-async function handleConnectNip07(): Promise<{ 
-  pubkey: string; 
-  relays: Record<string, { read: boolean; write: boolean }> | null 
-}> {
-  try {
-    console.log('[NIP-07] Starting connection process...');
-    
-    await Nip07TabService.ensureHelperTab();
-    console.log('[NIP-07] Helper tab ensured');
-    
-    const hasProvider = await Nip07TabService.waitForProvider(10000, true);
-    console.log('[NIP-07] Provider check result:', hasProvider);
-    
-    if (!hasProvider) {
-      throw new Error('NIP-07 provider not found. Please install a Nostr extension like Alby or nos2x.');
+async function handleSimpleLogin(payload: { identifier: string }): Promise<UserData> {
+  const { identifier } = payload;
+  
+  let pubkey: string;
+  
+  // Detect identifier type and convert to hex pubkey
+  if (identifier.startsWith('npub1')) {
+    // Convert npub to hex using nostr-tools
+    const { nip19 } = await import('nostr-tools');
+    try {
+      const decoded = nip19.decode(identifier);
+      if (decoded.type !== 'npub') {
+        throw new Error('Invalid npub format');
+      }
+      pubkey = decoded.data;
+    } catch (error) {
+      throw new Error('Invalid npub format. Please check the npub and try again.');
     }
-
-    console.log('[NIP-07] Getting public key...');
-    const pubkey = await Nip07TabService.getPublicKey();
-    console.log('[NIP-07] Got pubkey:', pubkey.substring(0, 8) + '...');
-    
-    console.log('[NIP-07] Getting relays...');
-    const relays = await Nip07TabService.getRelays();
-    console.log('[NIP-07] Got relays:', relays ? Object.keys(relays).length : 0);
-
-    return { pubkey, relays };
-  } catch (error) {
-    console.error('[NIP-07] Connection error:', error);
-    throw error;
-  }
-}
-
-/**
- * Handle NIP-07 login
- */
-async function handleNip07Login(payload: { 
-  pubkey: string; 
-  relays?: Record<string, { read: boolean; write: boolean }> | null 
-}): Promise<UserData> {
-  const { pubkey, relays: nip07Relays } = payload;
-
-  // Extract relay URLs from NIP-07 relays
-  let relayUrls: string[] = [];
-  if (nip07Relays) {
-    relayUrls = Object.entries(nip07Relays)
-      .filter(([_, config]) => config.read || config.write)
-      .map(([url, _]) => url);
+  } else if (identifier.includes('@')) {
+    // NIP-05 address
+    pubkey = await resolveNip05(identifier);
+  } else if (/^[0-9a-f]{64}$/i.test(identifier)) {
+    // Hex pubkey
+    pubkey = identifier.toLowerCase();
+  } else {
+    throw new Error('Invalid identifier. Please provide a valid npub, pubkey (hex), or NIP-05 address.');
   }
 
-  // Initialize relay manager with user's relays if available
+  // Initialize relay manager with default relays
   const rm = await getRelayManager();
-  if (relayUrls.length > 0) {
-    rm.addRelays(relayUrls);
-  }
 
   // Try to fetch user's relay list (NIP-65)
-  const contactsManager = new ContactsManager(rm);
-  const userRelays = await contactsManager.fetchUserRelays(pubkey);
-  if (userRelays.length > 0) {
-    rm.addRelays(userRelays);
-    relayUrls = [...new Set([...relayUrls, ...userRelays])];
+  const relayListManager = new RelayListManager(rm);
+  const relayMetadata = await relayListManager.fetchRelayList(pubkey);
+  
+  let relayUrls: string[] = [];
+  if (relayMetadata.length > 0) {
+    relayUrls = relayMetadata.map(r => r.url);
+    rm.setRelays(relayUrls);
+  } else {
+    // Use default relays if no relay list found
+    relayUrls = rm.getRelays();
   }
 
   // Create initial user data
@@ -365,9 +341,9 @@ async function handleNip07Login(payload: {
     pubkey,
     contacts: [],
     relays: relayUrls,
+    relayMetadata,
     lastUpdated: Date.now(),
   };
-
   await Database.setUserData(userData);
 
   // Ensure first login timestamp is set (only happens once)
@@ -480,43 +456,6 @@ async function handleFetchContacts(): Promise<any> {
 }
 
 /**
- * Remove a contact
- */
-async function handleRemoveContact(payload: { pubkey: string }): Promise<void> {
-  const rm = await getRelayManager();
-  const contactsManager = new ContactsManager(rm);
-  await contactsManager.removeContact(payload.pubkey);
-}
-
-/**
- * Add a contact - supports pubkey (hex) or nip05
- */
-async function handleAddContact(payload: { identifier: string }): Promise<void> {
-  const { identifier } = payload;
-  
-  let pubkey: string;
-  
-  if (identifier.includes('@')) {
-    pubkey = await resolveNip05(identifier);
-  } else if (/^[0-9a-f]{64}$/i.test(identifier)) {
-    pubkey = identifier.toLowerCase();
-  } else {
-    throw new Error('Invalid identifier. Please provide a valid pubkey (hex) or NIP-05 address.');
-  }
-  
-  const rm = await getRelayManager();
-  const contactsManager = new ContactsManager(rm);
-  const profileManager = new ProfileManager(rm);
-  
-  await contactsManager.addContact({ pubkey });
-  
-  // Fetch the profile for the new contact in background
-  profileManager.fetchProfiles([pubkey]).catch(error => {
-    console.error('Error fetching profile for new contact:', error);
-  });
-}
-
-/**
  * Resolve NIP-05 identifier to pubkey
  */
 async function resolveNip05(identifier: string): Promise<string> {
@@ -601,88 +540,6 @@ async function fetchRelayInfoInBackground(relayList: RelayMetadata[]): Promise<v
   console.log(`[NIP-11] Successfully updated ${relayInfoMap.size} relays with info`);
 }
 
-/**
- * Add a relay
- */
-async function handleAddRelay(payload: { 
-  url: string; 
-  type: 'read' | 'write' | 'both' 
-}): Promise<RelayMetadata[]> {
-  const userData = await Database.getUserData();
-  if (!userData) {
-    throw new Error('User not logged in');
-  }
-
-  const rm = await getRelayManager();
-  const relayListManager = new RelayListManager(rm);
-
-  const updatedRelays = await relayListManager.addRelay(payload.url, payload.type);
-  
-  const allRelayUrls = updatedRelays.map(r => r.url);
-  rm.setRelays(allRelayUrls);
-
-  return updatedRelays;
-}
-
-/**
- * Remove a relay
- */
-async function handleRemoveRelay(payload: { url: string }): Promise<RelayMetadata[]> {
-  const userData = await Database.getUserData();
-  if (!userData) {
-    throw new Error('User not logged in');
-  }
-
-  const rm = await getRelayManager();
-  const relayListManager = new RelayListManager(rm);
-
-  const updatedRelays = await relayListManager.removeRelay(payload.url);
-  
-  const allRelayUrls = updatedRelays.map(r => r.url);
-  rm.setRelays(allRelayUrls);
-
-  return updatedRelays;
-}
-
-/**
- * Update relay type
- */
-async function handleUpdateRelayType(payload: { 
-  url: string; 
-  type: 'read' | 'write' | 'both' 
-}): Promise<RelayMetadata[]> {
-  const userData = await Database.getUserData();
-  if (!userData) {
-    throw new Error('User not logged in');
-  }
-
-  const rm = await getRelayManager();
-  const relayListManager = new RelayListManager(rm);
-
-  const updatedRelays = await relayListManager.updateRelayType(payload.url, payload.type);
-  return updatedRelays;
-}
-
-/**
- * Publish relay list to Nostr (NIP-65)
- */
-async function handlePublishRelayList(): Promise<void> {
-  const userData = await Database.getUserData();
-  if (!userData) {
-    throw new Error('User not logged in');
-  }
-
-  const rm = await getRelayManager();
-  const relayListManager = new RelayListManager(rm);
-
-  const relayList = await relayListManager.getRelayList();
-
-  const signEvent = async (event: any) => {
-    return await Nip07TabService.signEvent(event);
-  };
-
-  await relayListManager.publishRelayList(relayList, signEvent);
-}
 
 // =============================================================================
 // Outbox Model Handlers
@@ -746,6 +603,13 @@ async function handleGetInboxScannerEvents(): Promise<any> {
  */
 async function handleTriggerInboxScan(): Promise<any> {
   return await getInboxScanner().performScan();
+}
+
+/**
+ * Handle stop inbox scan request
+ */
+async function handleStopInboxScan(): Promise<void> {
+  await getInboxScanner().stopScan();
 }
 
 /**

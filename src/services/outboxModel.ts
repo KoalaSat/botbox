@@ -25,6 +25,8 @@ interface RelayConnection {
   type: 'write' | 'read';
   reconnectAttempts: number;
   eoseReceived: boolean;
+  connectionTimeout?: ReturnType<typeof setTimeout>;
+  lastError?: string;
 }
 
 interface OutboxModelStatus {
@@ -42,10 +44,19 @@ export class OutboxModelService {
   private connections: Map<string, RelayConnection> = new Map();
   private events: NostrEvent[] = [];
   private eventRelayMap: Map<string, Set<string>> = new Map(); // eventId -> Set of relay URLs
+  private failedRelays: Map<string, { attempts: number; lastAttempt: number; lastError?: string }> = new Map();
   private readonly MAX_RECONNECT_ATTEMPTS = 3;
   private readonly RECONNECT_DELAY = 5000; // 5 seconds
+  private readonly CONNECTION_TIMEOUT = 10000; // 10 seconds for initial connection
   private readonly MAX_EVENTS_IN_MEMORY = 1000;
   private readonly BROADCAST_TIMEOUT = 10000; // 10 seconds
+  private readonly FAILED_RELAY_RETRY_DELAY = 60000; // 1 minute before retrying failed relays
+  
+  // Batching configuration
+  private readonly BATCH_INTERVAL = 2000; // 2 seconds - collect events for this duration
+  private readonly BATCH_MAX_SIZE = 50; // Max events per batch
+  private eventBatch: NostrEvent[] = [];
+  private batchTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private getRelayManager: () => Promise<RelayManager>) {}
 
@@ -85,12 +96,63 @@ export class OutboxModelService {
   }
 
   /**
-   * Connect to a single relay
+   * Connect to a single relay with timeout protection
    */
   private async connectToRelay(url: string, pubkey: string, type: 'write' | 'read' | 'both'): Promise<void> {
+    // Check if already connected
+    if (this.connections.has(url)) {
+      console.log(`[OutboxModel] Already connected to ${url}, skipping`);
+      return;
+    }
+
+    // Check if relay has recently failed
+    const failedInfo = this.failedRelays.get(url);
+    if (failedInfo && failedInfo.attempts >= this.MAX_RECONNECT_ATTEMPTS) {
+      const timeSinceLastAttempt = Date.now() - failedInfo.lastAttempt;
+      if (timeSinceLastAttempt < this.FAILED_RELAY_RETRY_DELAY) {
+        console.log(`[OutboxModel] Skipping ${url} - recently failed (retry in ${Math.round((this.FAILED_RELAY_RETRY_DELAY - timeSinceLastAttempt) / 1000)}s)`);
+        return;
+      } else {
+        // Reset failed relay after retry delay
+        console.log(`[OutboxModel] Retry delay expired for ${url}, attempting reconnection`);
+        this.failedRelays.delete(url);
+      }
+    }
+
     return new Promise((resolve) => {
+      let connectionTimeout: ReturnType<typeof setTimeout> | undefined;
+      let ws: WebSocket | undefined;
+      let isResolved = false;
+
+      const resolveOnce = () => {
+        if (!isResolved) {
+          isResolved = true;
+          if (connectionTimeout) {
+            clearTimeout(connectionTimeout);
+            connectionTimeout = undefined;
+          }
+          resolve();
+        }
+      };
+
+      // Set connection timeout
+      connectionTimeout = setTimeout(() => {
+        console.error(`[OutboxModel] Connection timeout for ${url}`);
+        this.markRelayAsFailed(url, 'Connection timeout');
+        if (ws) {
+          try {
+            if (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN) {
+              ws.close();
+            }
+          } catch (err) {
+            // Ignore close errors
+          }
+        }
+        resolveOnce();
+      }, this.CONNECTION_TIMEOUT);
+
       try {
-        const ws = new WebSocket(url);
+        ws = new WebSocket(url);
 
         const connection: RelayConnection = {
           ws,
@@ -98,10 +160,17 @@ export class OutboxModelService {
           type: type === 'both' ? 'write' : type, // Store as 'write' for 'both' for backwards compatibility
           reconnectAttempts: 0,
           eoseReceived: false,
+          connectionTimeout,
         };
 
         ws.onopen = () => {
           console.log(`[OutboxModel] Connected to ${type} relay:`, url);
+          
+          // Clear the connection timeout reference in the connection object
+          if (connection.connectionTimeout) {
+            clearTimeout(connection.connectionTimeout);
+            connection.connectionTimeout = undefined;
+          }
           
           // Subscribe based on relay type
           // For 'write' or 'both': subscribe to user's authored events
@@ -109,21 +178,24 @@ export class OutboxModelService {
             const subscriptionId = `outbox-authored-${Date.now()}-${Math.random()}`;
             const filter = { authors: [pubkey] };
             const req = JSON.stringify(['REQ', subscriptionId, filter]);
-            ws.send(req);
+            ws!.send(req);
             console.log(`[OutboxModel] Subscribed to authored events on ${url}`);
           }
           
           // For 'read' or 'both': subscribe to events where user is tagged
           if (type === 'read' || type === 'both') {
             const subscriptionId = `outbox-tagged-${Date.now()}-${Math.random()}`;
-            const filter = { '#p': [pubkey] };
+            const filter = { 
+              '#p': [pubkey],
+              kinds: [1, 4, 5, 6, 7, 9735, 30023], 
+            };
             const req = JSON.stringify(['REQ', subscriptionId, filter]);
-            ws.send(req);
+            ws!.send(req);
             console.log(`[OutboxModel] Subscribed to tagged events on ${url}`);
           }
 
           this.connections.set(url, connection);
-          resolve();
+          resolveOnce();
         };
 
         ws.onmessage = (event) => {
@@ -136,20 +208,47 @@ export class OutboxModelService {
         };
 
         ws.onerror = (err) => {
-          console.error(`[OutboxModel] WebSocket error on ${url}:`, err);
-          resolve(); // Resolve anyway to not block other connections
+          const errorMsg = err instanceof ErrorEvent ? err.message : 'Connection error';
+          console.error(`[OutboxModel] WebSocket error on ${url}:`, errorMsg);
+          this.markRelayAsFailed(url, errorMsg);
+          resolveOnce();
         };
 
-        ws.onclose = () => {
-          console.log(`[OutboxModel] Disconnected from ${url}`);
+        ws.onclose = (event) => {
+          console.log(`[OutboxModel] Disconnected from ${url} (code: ${event.code}, reason: ${event.reason})`);
+          
+          const conn = this.connections.get(url);
+          
+          // Clear timeout if exists in connection
+          if (conn && conn.connectionTimeout) {
+            clearTimeout(conn.connectionTimeout);
+            conn.connectionTimeout = undefined;
+          }
+          
           this.connections.delete(url);
 
-          // Auto-reconnect if not manually disconnected
-          this.attemptReconnect(url, pubkey, type, connection.reconnectAttempts);
+          // Check the failedRelays map for the actual attempt count
+          const failedInfo = this.failedRelays.get(url);
+          const currentAttempts = failedInfo?.attempts || 0;
+
+          // Only auto-reconnect if it's not a manual disconnect and not a fatal error
+          // Code 1000 = normal closure, 1001 = going away
+          const shouldReconnect = currentAttempts < this.MAX_RECONNECT_ATTEMPTS && 
+                                  event.code !== 1000 && event.code !== 1001;
+          
+          if (shouldReconnect) {
+            this.attemptReconnect(url, pubkey, type, currentAttempts);
+          } else if (event.code !== 1000 && event.code !== 1001) {
+            this.markRelayAsFailed(url, `Connection closed with code ${event.code}`);
+          }
+          
+          resolveOnce();
         };
       } catch (err) {
-        console.error(`[OutboxModel] Failed to connect to ${url}:`, err);
-        resolve();
+        const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+        console.error(`[OutboxModel] Failed to connect to ${url}:`, errorMsg);
+        this.markRelayAsFailed(url, errorMsg);
+        resolveOnce();
       }
     });
   }
@@ -160,19 +259,46 @@ export class OutboxModelService {
   disconnect(): void {
     console.log(`[OutboxModel] Disconnecting from ${this.connections.size} relays`);
     
+    // Clear batch timer and flush pending events
+    if (this.batchTimer) {
+      clearTimeout(this.batchTimer);
+      this.batchTimer = null;
+    }
+    
+    // Flush any pending events in the batch
+    if (this.eventBatch.length > 0) {
+      console.log(`[OutboxModel] Flushing ${this.eventBatch.length} pending events before disconnect`);
+      this.processBatch().catch(err => {
+        console.error('[OutboxModel] Error flushing batch on disconnect:', err);
+      });
+    }
+    
     for (const [url, connection] of this.connections.entries()) {
       connection.reconnectAttempts = this.MAX_RECONNECT_ATTEMPTS; // Prevent auto-reconnect
-      connection.ws.close();
+      
+      // Clear connection timeout if exists
+      if (connection.connectionTimeout) {
+        clearTimeout(connection.connectionTimeout);
+      }
+      
+      try {
+        if (connection.ws.readyState === WebSocket.OPEN || connection.ws.readyState === WebSocket.CONNECTING) {
+          connection.ws.close(1000, 'Manual disconnect'); // Normal closure
+        }
+      } catch (err) {
+        console.error(`[OutboxModel] Error closing connection to ${url}:`, err);
+      }
     }
     
     this.connections.clear();
     this.events = [];
+    this.eventBatch = [];
   }
 
   /**
-   * Get connection status
+   * Get connection status including failed relays
    */
-  getStatus(): OutboxModelStatus {
+  getStatus(): OutboxModelStatus & { failedRelays?: Array<{ url: string; attempts: number; lastError?: string }> } {
     const writeRelays: Array<{ url: string; connected: boolean; eoseReceived: boolean }> = [];
     const readRelays: Array<{ url: string; connected: boolean; eoseReceived: boolean }> = [];
     let totalConnected = 0;
@@ -198,12 +324,20 @@ export class OutboxModelService {
       }
     }
 
+    // Include failed relays info
+    const failedRelaysList = Array.from(this.failedRelays.entries()).map(([url, info]) => ({
+      url,
+      attempts: info.attempts,
+      lastError: info.lastError,
+    }));
+
     return {
       writeRelays,
       readRelays,
       totalConnected,
       totalRelays: this.connections.size,
       totalEoseReceived,
+      failedRelays: failedRelaysList.length > 0 ? failedRelaysList : undefined,
     };
   }
 
@@ -229,7 +363,22 @@ export class OutboxModelService {
   }
 
   /**
-   * Attempt to reconnect to a relay
+   * Mark a relay as failed
+   */
+  private markRelayAsFailed(url: string, error?: string): void {
+    const failedInfo = this.failedRelays.get(url) || { attempts: 0, lastAttempt: 0 };
+    failedInfo.attempts++;
+    failedInfo.lastAttempt = Date.now();
+    failedInfo.lastError = error;
+    this.failedRelays.set(url, failedInfo);
+    
+    if (failedInfo.attempts >= this.MAX_RECONNECT_ATTEMPTS) {
+      console.warn(`[OutboxModel] Relay ${url} marked as failed after ${failedInfo.attempts} attempts. Last error: ${error}`);
+    }
+  }
+
+  /**
+   * Attempt to reconnect to a relay with exponential backoff
    */
   private async attemptReconnect(
     url: string,
@@ -239,20 +388,57 @@ export class OutboxModelService {
   ): Promise<void> {
     if (currentAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
       console.log(`[OutboxModel] Max reconnect attempts reached for ${url}`);
+      this.markRelayAsFailed(url, 'Max reconnect attempts reached');
       return;
     }
 
     const nextAttempt = currentAttempts + 1;
+    // Exponential backoff: 5s, 10s, 20s
+    const delay = this.RECONNECT_DELAY * Math.pow(2, currentAttempts);
+    
     console.log(
-      `[OutboxModel] Reconnecting to ${url} (attempt ${nextAttempt}/${this.MAX_RECONNECT_ATTEMPTS})...`
+      `[OutboxModel] Will reconnect to ${url} in ${delay / 1000}s (attempt ${nextAttempt}/${this.MAX_RECONNECT_ATTEMPTS})`
     );
 
     setTimeout(async () => {
       const userData = await Database.getUserData();
       if (userData) {
+        // Update the reconnect attempt counter before connecting
+        const failedInfo = this.failedRelays.get(url) || { attempts: 0, lastAttempt: Date.now() };
+        failedInfo.attempts = nextAttempt;
+        this.failedRelays.set(url, failedInfo);
+        
         await this.connectToRelay(url, userData.pubkey, type);
       }
-    }, this.RECONNECT_DELAY);
+    }, delay);
+  }
+
+  /**
+   * Get list of failed relays
+   */
+  getFailedRelays(): Array<{ url: string; attempts: number; lastError?: string }> {
+    return Array.from(this.failedRelays.entries()).map(([url, info]) => ({
+      url,
+      attempts: info.attempts,
+      lastError: info.lastError,
+    }));
+  }
+
+  /**
+   * Clear failed relay status (allows retry)
+   */
+  clearFailedRelay(url: string): void {
+    this.failedRelays.delete(url);
+    console.log(`[OutboxModel] Cleared failed status for ${url}`);
+  }
+
+  /**
+   * Clear all failed relay statuses
+   */
+  clearAllFailedRelays(): void {
+    const count = this.failedRelays.size;
+    this.failedRelays.clear();
+    console.log(`[OutboxModel] Cleared ${count} failed relay statuses`);
   }
 
   /**
@@ -313,135 +499,272 @@ export class OutboxModelService {
     
     console.log(`[OutboxModel] New event received from ${relayUrl}:`, event.kind, event.id.substring(0, 8));
 
-    // Broadcast event to appropriate relays
-    this.broadcastEvent(event).catch((error) => {
-      console.error('[OutboxModel] Failed to broadcast event:', error);
+    // Add event to batch for broadcasting
+    this.addEventToBatch(event);
+  }
+
+  /**
+   * Add event to batch for broadcasting
+   */
+  private addEventToBatch(event: NostrEvent): void {
+    // Check if event is already in batch
+    if (this.eventBatch.find((e) => e.id === event.id)) {
+      return;
+    }
+
+    this.eventBatch.push(event);
+    console.log(`[OutboxModel] Added event to batch (${this.eventBatch.length}/${this.BATCH_MAX_SIZE})`);
+
+    // If batch is full, process immediately
+    if (this.eventBatch.length >= this.BATCH_MAX_SIZE) {
+      console.log('[OutboxModel] Batch full, processing immediately');
+      this.flushBatch();
+      return;
+    }
+
+    // Otherwise, schedule batch processing if not already scheduled
+    if (!this.batchTimer) {
+      this.batchTimer = setTimeout(() => {
+        this.flushBatch();
+      }, this.BATCH_INTERVAL);
+      console.log(`[OutboxModel] Batch timer set for ${this.BATCH_INTERVAL}ms`);
+    }
+  }
+
+  /**
+   * Flush and process the current batch
+   */
+  private flushBatch(): void {
+    if (this.batchTimer) {
+      clearTimeout(this.batchTimer);
+      this.batchTimer = null;
+    }
+
+    if (this.eventBatch.length === 0) {
+      return;
+    }
+
+    const batchToProcess = [...this.eventBatch];
+    this.eventBatch = [];
+
+    console.log(`[OutboxModel] Processing batch of ${batchToProcess.length} events`);
+    
+    this.processBatch(batchToProcess).catch((error) => {
+      console.error('[OutboxModel] Failed to process batch:', error);
     });
   }
 
   /**
-   * Broadcast event to appropriate relays based on event type
-   * - User-authored events: broadcast to user's write relays + tagged users' read relays
-   * - User-tagged events: broadcast to user's read relays
-   * Special handling for Profile (kind 0) and Relay List (kind 10002) events:
-   * these are broadcast to all read relays of all contacts in the user's follow list
+   * Process a batch of events for broadcasting
    */
-  private async broadcastEvent(event: NostrEvent): Promise<void> {
-    try {
-      console.log(
-        '[OutboxModel] Broadcasting event',
-        event.id.substring(0, 8),
-        'kind:',
-        event.kind
-      );
+  private async processBatch(batch?: NostrEvent[]): Promise<void> {
+    const eventsToProcess = batch || this.eventBatch;
+    
+    if (eventsToProcess.length === 0) {
+      return;
+    }
 
+    console.log(`[OutboxModel] Broadcasting batch of ${eventsToProcess.length} events`);
+
+    try {
       const userData = await Database.getUserData();
       if (!userData) {
-        console.warn('[OutboxModel] No user data, cannot broadcast');
+        console.warn('[OutboxModel] No user data, cannot broadcast batch');
         return;
       }
 
       const rm = await this.getRelayManager();
       const relayListManager = new RelayListManager(rm);
 
-      let allTargetRelays: string[] = [];
+      // Group events by their target relays to optimize broadcasting
+      const relayToEventsMap = new Map<string, NostrEvent[]>();
 
-      // Check if this event has already been broadcast
-      const alreadyBroadcast = await this.hasBeenBroadcast(event.id);
-      if (alreadyBroadcast) {
-        console.log('[OutboxModel] Event', event.id.substring(0, 8), 'already broadcast, skipping');
-        return;
-      }
-
-      // Check if event was created before user's first login (don't broadcast old events)
-      const firstLoginTimestamp = await Database.getFirstLoginTimestamp();
-      if (firstLoginTimestamp && event.created_at < firstLoginTimestamp) {
-        console.log(
-          '[OutboxModel] Event created before first login (',
-          event.created_at,
-          '<',
-          firstLoginTimestamp,
-          '), skipping broadcast'
-        );
-        return;
-      }
-
-      // Check if user is the author of this event
-      const isUserAuthor = event.pubkey === userData.pubkey;
-
-      // Check if user is tagged in this event
-      const taggedPubkeys = this.extractTaggedPubkeys(event);
-      const isUserTagged = taggedPubkeys.includes(userData.pubkey);
-
-      if (!isUserAuthor && isUserTagged) {
-        // Event where user is tagged (but not authored by user)
-        // Broadcast to user's read relays (inbox)
-        console.log('[OutboxModel] User is tagged in event, broadcasting to inbox relays');
-        const inboxRelays = await relayListManager.getReadRelays();
-        console.log('[OutboxModel] User inbox relays:', inboxRelays.length);
-        allTargetRelays = inboxRelays;
-      } else if (isUserAuthor && (event.kind === 0 || event.kind === 10002)) {
-        // Special handling for Profile (kind 0) and Relay List (kind 10002) events
-        // authored by the user
-        console.log('[OutboxModel] Special handling for Profile/Relay List event');
+      for (const event of eventsToProcess) {
+        const targetRelays = await this.determineTargetRelays(event, userData, relayListManager);
         
-        // Get all contacts from user's follow list
-        const contacts = userData.contacts || [];
-        console.log('[OutboxModel] User has', contacts.length, 'contacts');
-
-        if (contacts.length === 0) {
-          console.warn('[OutboxModel] No contacts found, falling back to outbox relays');
-          const outboxRelays = await relayListManager.getWriteRelays();
-          allTargetRelays = outboxRelays;
-        } else {
-          // Collect all read relays for all contacts
-          const contactsReadRelays = await this.collectReadRelaysForContacts(contacts, relayListManager);
-          console.log('[OutboxModel] Collected', contactsReadRelays.length, 'read relays from contacts');
-          
-          // Also include user's own outbox relays
-          const outboxRelays = await relayListManager.getWriteRelays();
-          console.log('[OutboxModel] User outbox relays:', outboxRelays.length);
-          
-          // Combine and deduplicate
-          allTargetRelays = [...new Set([...outboxRelays, ...contactsReadRelays])];
+        for (const relayUrl of targetRelays) {
+          if (!relayToEventsMap.has(relayUrl)) {
+            relayToEventsMap.set(relayUrl, []);
+          }
+          relayToEventsMap.get(relayUrl)!.push(event);
         }
-      } else if (isUserAuthor) {
-        // Normal broadcasting for user-authored events: user's write relays + tagged users' read relays
-        console.log('[OutboxModel] Broadcasting user-authored event');
-        
-        // Get user's write relays (outbox)
-        const outboxRelays = await relayListManager.getWriteRelays();
-        console.log('[OutboxModel] User outbox relays:', outboxRelays.length);
-
-        console.log('[OutboxModel] Tagged pubkeys:', taggedPubkeys.length);
-
-        // Collect read relays for tagged pubkeys (inbox)
-        const inboxRelays = await this.collectInboxRelays(taggedPubkeys, relayListManager);
-        console.log('[OutboxModel] Tagged users inbox relays:', inboxRelays.length);
-
-        // Combine and deduplicate all target relays
-        allTargetRelays = [...new Set([...outboxRelays, ...inboxRelays])];
-      } else {
-        console.log('[OutboxModel] Event not relevant to user (not authored by or tagging user)');
-        return;
       }
 
-      // Exclude relays we're already connected to (no need to broadcast back)
-      allTargetRelays = this.excludeConnectedRelays(allTargetRelays);
+      console.log(`[OutboxModel] Broadcasting to ${relayToEventsMap.size} unique relays`);
 
-      console.log('[OutboxModel] Total target relays (deduplicated):', allTargetRelays.length);
+      // Broadcast all events to each relay
+      const broadcastPromises: Promise<void>[] = [];
 
-      if (allTargetRelays.length === 0) {
-        console.warn('[OutboxModel] No target relays found, cannot broadcast');
-        return;
+      for (const [relayUrl, events] of relayToEventsMap.entries()) {
+        broadcastPromises.push(
+          this.broadcastMultipleEventsToRelay(relayUrl, events)
+        );
       }
 
-      // Broadcast to all target relays
-      await this.broadcastToMultipleRelays(allTargetRelays, event);
+      await Promise.allSettled(broadcastPromises);
+      
+      console.log('[OutboxModel] Batch broadcast complete');
     } catch (error) {
-      console.error('[OutboxModel] Error broadcasting event:', error);
+      console.error('[OutboxModel] Error processing batch:', error);
     }
   }
+
+  /**
+   * Determine target relays for an event
+   */
+  private async determineTargetRelays(
+    event: NostrEvent,
+    userData: { pubkey: string; contacts?: Array<{ pubkey: string; relay?: string }> },
+    relayListManager: RelayListManager
+  ): Promise<string[]> {
+    // Check if event has already been broadcast
+    const alreadyBroadcast = await this.hasBeenBroadcast(event.id);
+    if (alreadyBroadcast) {
+      console.log('[OutboxModel] Event', event.id.substring(0, 8), 'already broadcast, skipping');
+      return [];
+    }
+
+    // Check if event was created before user's first login
+    const firstLoginTimestamp = await Database.getFirstLoginTimestamp();
+    if (firstLoginTimestamp && event.created_at < firstLoginTimestamp) {
+      console.log(
+        '[OutboxModel] Event created before first login, skipping broadcast'
+      );
+      return [];
+    }
+
+    const isUserAuthor = event.pubkey === userData.pubkey;
+    const taggedPubkeys = this.extractTaggedPubkeys(event);
+    const isUserTagged = taggedPubkeys.includes(userData.pubkey);
+
+    let allTargetRelays: string[] = [];
+
+    if (!isUserAuthor && isUserTagged) {
+      // Event where user is tagged (but not authored by user)
+      const inboxRelays = await relayListManager.getReadRelays();
+      allTargetRelays = inboxRelays;
+    } else if (isUserAuthor && (event.kind === 0 || event.kind === 10002)) {
+      // Special handling for Profile (kind 0) and Relay List (kind 10002) events
+      const contacts = userData.contacts || [];
+
+      if (contacts.length === 0) {
+        const outboxRelays = await relayListManager.getWriteRelays();
+        allTargetRelays = outboxRelays;
+      } else {
+        const contactsReadRelays = await this.collectReadRelaysForContacts(contacts, relayListManager);
+        const outboxRelays = await relayListManager.getWriteRelays();
+        allTargetRelays = [...new Set([...outboxRelays, ...contactsReadRelays])];
+      }
+    } else if (isUserAuthor) {
+      // Normal broadcasting for user-authored events
+      const outboxRelays = await relayListManager.getWriteRelays();
+      const inboxRelays = await this.collectInboxRelays(taggedPubkeys, relayListManager);
+      allTargetRelays = [...new Set([...outboxRelays, ...inboxRelays])];
+    } else {
+      return [];
+    }
+
+    // Exclude relays we're already connected to
+    allTargetRelays = this.excludeConnectedRelays(allTargetRelays);
+
+    return allTargetRelays;
+  }
+
+  /**
+   * Broadcast multiple events to a single relay
+   */
+  private async broadcastMultipleEventsToRelay(
+    relayUrl: string,
+    events: NostrEvent[]
+  ): Promise<void> {
+    return new Promise((resolve) => {
+      let ws: WebSocket;
+      let isResolved = false;
+      const eventsSent = new Set<string>();
+      const eventsAcknowledged = new Set<string>();
+      
+      const resolveOnce = () => {
+        if (!isResolved) {
+          isResolved = true;
+          resolve();
+        }
+      };
+
+      const timeout = setTimeout(() => {
+        if (ws) {
+          try {
+            ws.close();
+          } catch (err) {
+            // Ignore close errors
+          }
+        }
+        console.warn(`[OutboxModel] Timeout broadcasting ${events.length} events to ${relayUrl}`);
+        resolveOnce();
+      }, this.BROADCAST_TIMEOUT);
+
+      try {
+        ws = new WebSocket(relayUrl);
+      } catch (error) {
+        clearTimeout(timeout);
+        console.error(`[OutboxModel] Failed to connect to ${relayUrl}:`, error);
+        resolveOnce();
+        return;
+      }
+
+      ws.onopen = () => {
+        // Send all events
+        for (const event of events) {
+          const eventMessage = JSON.stringify(['EVENT', event]);
+          ws.send(eventMessage);
+          eventsSent.add(event.id);
+        }
+        console.log(`[OutboxModel] Sent ${events.length} events to ${relayUrl}`);
+      };
+
+      ws.onmessage = (msg) => {
+        try {
+          const data = JSON.parse(msg.data);
+          const [type, eventId, accepted, message] = data;
+
+          if (type === 'OK') {
+            eventsAcknowledged.add(eventId);
+            
+            if (accepted) {
+              // Mark event as broadcast
+              this.markAsBroadcast(eventId).catch(err => {
+                console.error('[OutboxModel] Error marking event as broadcast:', err);
+              });
+            } else {
+              console.warn(`[OutboxModel] ${relayUrl} rejected event ${eventId.substring(0, 8)}:`, message);
+            }
+
+            // If all events acknowledged, close connection
+            if (eventsAcknowledged.size === eventsSent.size) {
+              clearTimeout(timeout);
+              ws.close();
+              console.log(`[OutboxModel] All ${eventsAcknowledged.size} events acknowledged by ${relayUrl}`);
+              resolveOnce();
+            }
+          }
+        } catch (error) {
+          console.error(`[OutboxModel] Error parsing message from ${relayUrl}:`, error);
+        }
+      };
+
+      ws.onerror = (error) => {
+        clearTimeout(timeout);
+        const errorMsg = error instanceof ErrorEvent ? error.message : 'WebSocket error';
+        console.error(`[OutboxModel] Error broadcasting to ${relayUrl}:`, errorMsg);
+        resolveOnce();
+      };
+
+      ws.onclose = () => {
+        clearTimeout(timeout);
+        resolveOnce();
+      };
+    });
+  }
+
 
   /**
    * Extract pubkeys from event tags (p tags)
@@ -558,6 +881,10 @@ export class OutboxModelService {
     try {
       const key = 'broadcastHistory';
       const result = await chrome.storage.local.get(key);
+      // Handle Firefox compatibility: result might be undefined
+      if (!result || typeof result !== 'object') {
+        return false;
+      }
       const history: string[] = result[key] || [];
       
       return history.includes(eventId);
@@ -574,6 +901,13 @@ export class OutboxModelService {
     try {
       const key = 'broadcastHistory';
       const result = await chrome.storage.local.get(key);
+      // Handle Firefox compatibility: result might be undefined
+      if (!result || typeof result !== 'object') {
+        await chrome.storage.local.set({ [key]: [eventId] });
+        console.log('[OutboxModel] Marked event', eventId.substring(0, 8), 'as broadcast');
+        return;
+      }
+      
       const history: string[] = result[key] || [];
       
       if (!history.includes(eventId)) {
@@ -607,126 +941,4 @@ export class OutboxModelService {
     return filtered;
   }
 
-  /**
-   * Broadcast to multiple relays
-   */
-  private async broadcastToMultipleRelays(
-    relays: string[],
-    event: NostrEvent
-  ): Promise<void> {
-    const broadcastPromises = relays.map((relayUrl) =>
-      this.broadcastToSingleRelay(relayUrl, event)
-    );
-
-    const results = await Promise.allSettled(broadcastPromises);
-
-    let successCount = 0;
-    let duplicateCount = 0;
-    let failureCount = 0;
-
-    results.forEach((result, index) => {
-      const relayUrl = relays[index];
-      if (result.status === 'fulfilled') {
-        const response = result.value;
-        if (response.success) {
-          successCount++;
-          if (response.duplicate) {
-            duplicateCount++;
-            console.log(`[OutboxModel] ℹ ${relayUrl} already had the event`);
-          }
-        } else {
-          console.log(`[OutboxModel] ℹ ${relayUrl} failed: ${JSON.stringify(response.message)}`);
-          failureCount++;
-        }
-      } else {
-        failureCount++;
-        console.error(
-          `[OutboxModel] ✗ Failed to broadcast to ${relayUrl}:`,
-          result.reason
-        );
-      }
-    });
-
-    console.log(
-      `[OutboxModel] Broadcast complete: ${successCount} succeeded, ${duplicateCount} duplicates, ${failureCount} failed`
-    );
-
-    // Mark event as broadcast if at least one relay accepted it
-    if (successCount > 0) {
-      await this.markAsBroadcast(event.id);
-    }
-  }
-
-  /**
-   * Broadcast event to a single relay
-   */
-  private async broadcastToSingleRelay(
-    relayUrl: string,
-    event: NostrEvent
-  ): Promise<BroadcastResult> {
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        ws.close();
-        resolve({ success: false, duplicate: false, message: 'Timeout' });
-      }, this.BROADCAST_TIMEOUT);
-
-      let ws: WebSocket;
-      try {
-        ws = new WebSocket(relayUrl);
-      } catch (error) {
-        clearTimeout(timeout);
-        resolve({ success: false, duplicate: false, message: `Connection error: ${error}` });
-        return;
-      }
-
-      ws.onopen = () => {
-        const eventMessage = JSON.stringify(['EVENT', event]);
-        ws.send(eventMessage);
-      };
-
-      ws.onmessage = (msg) => {
-        try {
-          const data = JSON.parse(msg.data);
-          const [type, eventId, accepted, message] = data;
-
-          if (type === 'OK' && eventId === event.id) {
-            clearTimeout(timeout);
-            ws.close();
-
-            if (accepted) {
-              const isDuplicate =
-                message &&
-                (message.toLowerCase().includes('duplicate') ||
-                  message.toLowerCase().includes('already'));
-
-              resolve({
-                success: true,
-                duplicate: isDuplicate,
-                message: JSON.stringify(message) || undefined,
-              });
-            } else {
-              console.warn(`[OutboxModel] ${relayUrl} rejected event:`, JSON.stringify(message));
-              resolve({
-                success: false,
-                duplicate: false,
-                message: JSON.stringify(message) || 'Event rejected',
-              });
-            }
-          }
-        } catch (error) {
-          console.error(`[OutboxModel] Error parsing message from ${relayUrl}:`, error);
-        }
-      };
-
-      ws.onerror = (error) => {
-        clearTimeout(timeout);
-        resolve({ success: false, duplicate: false, message: `WebSocket error: ${JSON.stringify(error)}` });
-      };
-
-      ws.onclose = () => {
-        clearTimeout(timeout);
-        resolve({ success: false, duplicate: false, message: 'Connection closed without response' });
-      };
-    });
-  }
 }

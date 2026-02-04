@@ -45,20 +45,34 @@ export class RelayManager {
   }
 
   /**
-   * Fetch events from relays with better error handling
+   * Fetch events from relays with better error handling and timeout protection
    */
   async fetchEvents(filters: Filter[], timeoutMs: number = 5000): Promise<NostrEvent[]> {
     try {
       console.log(`[RelayManager] Fetching events from ${this.relays.length} relays...`);
       
-      // nostr-tools v2 querySync expects a single Filter, so we need to query each filter separately
-      const allEvents: NostrEvent[] = [];
-      for (const filter of filters) {
-        const events = await this.pool.querySync(this.relays, filter, {
-          maxWait: timeoutMs,
-        });
-        allEvents.push(...events);
-      }
+      // Add additional timeout wrapper to prevent hanging
+      const fetchPromise = (async () => {
+        // nostr-tools v2 querySync expects a single Filter, so we need to query each filter separately
+        const allEvents: NostrEvent[] = [];
+        for (const filter of filters) {
+          const events = await this.pool.querySync(this.relays, filter, {
+            maxWait: timeoutMs,
+          });
+          allEvents.push(...events);
+        }
+        return allEvents;
+      })();
+
+      // Race against timeout
+      const timeoutPromise = new Promise<NostrEvent[]>((resolve) => {
+        setTimeout(() => {
+          console.warn(`[RelayManager] Fetch timed out after ${timeoutMs}ms, returning partial results`);
+          resolve([]);
+        }, timeoutMs + 2000); // Add 2s buffer to nostr-tools timeout
+      });
+
+      const allEvents = await Promise.race([fetchPromise, timeoutPromise]);
       
       console.log(`[RelayManager] Successfully fetched ${allEvents.length} events`);
       return allEvents;
@@ -83,7 +97,8 @@ export class RelayManager {
   subscribe(
     filters: Filter[],
     onEvent: (event: NostrEvent) => void,
-    onEose?: () => void
+    onEose?: () => void,
+    timeoutMs: number = 30000
   ): string {
     const subId = Math.random().toString(36).substring(7);
     
@@ -92,6 +107,14 @@ export class RelayManager {
     // For subscriptions with multiple filters, we need to merge them into a single filter
     // In practice, most subscriptions use a single filter
     const filter = filters.length === 1 ? filters[0] : this.mergeFilters(filters);
+    
+    // Set up timeout for subscription initialization
+    const initTimeout = setTimeout(() => {
+      console.warn(`[RelayManager] Subscription ${subId} initialization timeout - some relays may not have responded`);
+    }, timeoutMs);
+    
+    let eoseCount = 0;
+    const expectedRelays = this.relays.length;
     
     const sub = this.pool.subscribeMany(
       this.relays,
@@ -105,20 +128,32 @@ export class RelayManager {
           }
         },
         oneose: () => {
-          console.log(`[RelayManager] Subscription ${subId} reached EOSE`);
-          if (onEose) {
-            try {
-              onEose();
-            } catch (error) {
-              console.error('[RelayManager] Error in EOSE handler:', error);
+          eoseCount++;
+          console.log(`[RelayManager] Subscription ${subId} EOSE from relay (${eoseCount}/${expectedRelays})`);
+          
+          // Clear timeout once we get first EOSE
+          if (eoseCount === 1) {
+            clearTimeout(initTimeout);
+          }
+          
+          // Call onEose only after all relays have sent EOSE or timeout
+          if (eoseCount >= expectedRelays) {
+            console.log(`[RelayManager] Subscription ${subId} reached EOSE on all relays`);
+            if (onEose) {
+              try {
+                onEose();
+              } catch (error) {
+                console.error('[RelayManager] Error in EOSE handler:', error);
+              }
             }
           }
         },
       }
     );
 
-    // Store subscription for cleanup
+    // Store subscription and timeout for cleanup
     (this as any)[`sub_${subId}`] = sub;
+    (this as any)[`sub_${subId}_timeout`] = initTimeout;
     
     return subId;
   }
@@ -163,8 +198,19 @@ export class RelayManager {
    */
   unsubscribe(subId: string): void {
     const sub = (this as any)[`sub_${subId}`];
+    const timeout = (this as any)[`sub_${subId}_timeout`];
+    
+    if (timeout) {
+      clearTimeout(timeout);
+      delete (this as any)[`sub_${subId}_timeout`];
+    }
+    
     if (sub) {
-      sub.close();
+      try {
+        sub.close();
+      } catch (error) {
+        console.error(`[RelayManager] Error closing subscription ${subId}:`, error);
+      }
       delete (this as any)[`sub_${subId}`];
     }
   }
@@ -210,7 +256,7 @@ export class RelayManager {
   }
 
   /**
-   * Test connectivity to relays and return healthy ones
+   * Test connectivity to relays and return healthy ones with timeout protection
    * This can be used to filter out non-responsive relays
    */
   async testRelayConnectivity(timeoutMs: number = 3000): Promise<string[]> {
@@ -218,20 +264,32 @@ export class RelayManager {
     
     const healthyRelays: string[] = [];
     
-    // Test each relay by attempting a simple query
+    // Test each relay by attempting a simple query with race condition
     const testPromises = this.relays.map(async (relay) => {
-      try {
-        // Create a temporary connection and test with a simple query
-        const events = await this.pool.querySync([relay], { kinds: [0], limit: 1 }, {
-          maxWait: timeoutMs,
-        });
-        
-        console.log(`[RelayManager] ✓ Relay ${relay} is responsive`);
-        return relay;
-      } catch (error) {
-        console.warn(`[RelayManager] ✗ Relay ${relay} failed connectivity test:`, error);
-        return null;
-      }
+      const testPromise = (async () => {
+        try {
+          // Create a temporary connection and test with a simple query
+          const events = await this.pool.querySync([relay], { kinds: [0], limit: 1 }, {
+            maxWait: timeoutMs,
+          });
+          
+          console.log(`[RelayManager] ✓ Relay ${relay} is responsive`);
+          return relay;
+        } catch (error) {
+          console.warn(`[RelayManager] ✗ Relay ${relay} failed connectivity test:`, error);
+          return null;
+        }
+      })();
+
+      // Race against timeout
+      const timeoutPromise = new Promise<string | null>((resolve) => {
+        setTimeout(() => {
+          console.warn(`[RelayManager] ✗ Relay ${relay} connectivity test timed out`);
+          resolve(null);
+        }, timeoutMs + 1000); // Add 1s buffer
+      });
+
+      return Promise.race([testPromise, timeoutPromise]);
     });
 
     const results = await Promise.allSettled(testPromises);
@@ -266,10 +324,27 @@ export class RelayManager {
   }
 
   /**
-   * Close all connections
+   * Close all connections and cleanup
    */
   close(): void {
-    this.pool.close(this.relays);
+    try {
+      // Clean up any pending timeouts
+      const keys = Object.keys(this);
+      keys.forEach(key => {
+        if (key.includes('_timeout')) {
+          const timeout = (this as any)[key];
+          if (timeout) {
+            clearTimeout(timeout);
+            delete (this as any)[key];
+          }
+        }
+      });
+
+      this.pool.close(this.relays);
+      console.log(`[RelayManager] Closed connections to ${this.relays.length} relays`);
+    } catch (error) {
+      console.error('[RelayManager] Error closing connections:', error);
+    }
   }
 
   /**

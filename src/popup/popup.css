@@ -157,3 +157,50 @@
   font-weight: 600;
   color: var(--text-primary);
 }
+
+/* Login input - only used in popup */
+.login-input {
+  width: 100%;
+  padding: 12px 16px;
+  margin: 12px 0;
+  border: 2px solid var(--border-color);
+  border-radius: 8px;
+  font-size: 14px;
+  font-family: inherit;
+  transition: all 0.2s;
+  box-sizing: border-box;
+}
+
+.login-input:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.login-input:disabled {
+  background: var(--surface-color);
+  color: var(--text-tertiary);
+  cursor: not-allowed;
+}
+
+/* Footer styles */
+.footer {
+  text-align: center;
+  padding: 0px 16px;
+  margin-top: 0px;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  border-top: 1px solid var(--border-color);
+}
+
+.footer a {
+  color: var(--primary-color);
+  text-decoration: none;
+  font-weight: 500;
+  transition: color 0.2s;
+}
+
+.footer a:hover {
+  color: var(--primary-hover);
+  text-decoration: underline;
+}

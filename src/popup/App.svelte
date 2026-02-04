@@ -1,39 +1,55 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { sendToBackground } from '../shared/messaging';
-  import { MessageType } from '../shared/messaging';
-  import type { UserData, StoredContact } from '../services/db';
-  import { Database } from '../services/db';
-  import Contacts from '../contacts/Contacts.svelte';
-  import Relays from '../relays/Relays.svelte';
-  import RelayEvents from '../relayEvents/RelayEvents.svelte';
-  import InboxScanner from '../inboxScanner/InboxScanner.svelte';
-  import { User, RefreshCw, LogOut, X, ExternalLink, ArrowLeft } from 'lucide-svelte';
-  import { formatPubkey } from '../shared/formatters';
+  import { onMount } from "svelte";
+  import { sendToBackground } from "../shared/messaging";
+  import { MessageType } from "../shared/messaging";
+  import type { UserData, StoredContact } from "../services/db";
+  import { Database } from "../services/db";
+  import Contacts from "../contacts/Contacts.svelte";
+  import Relays from "../relays/Relays.svelte";
+  import RelayEvents from "../relayEvents/RelayEvents.svelte";
+  import InboxScanner from "../inboxScanner/InboxScanner.svelte";
+  import {
+    User,
+    RefreshCw,
+    LogOut,
+    X,
+    ExternalLink,
+    ArrowLeft,
+  } from "lucide-svelte";
+  import { formatPubkey } from "../shared/formatters";
 
   let isLoggedIn = false;
   let isLoading = false;
-  let error = '';
+  let error = "";
   let userData: UserData | null = null;
   let contacts: StoredContact[] = [];
   let isFetchingContacts = false;
-  let currentView: 'home' | 'contacts' | 'relays' | 'relayEvents' | 'inboxScanner' = 'home';
+  let currentView:
+    | "home"
+    | "contacts"
+    | "relays"
+    | "relayEvents"
+    | "inboxScanner" = "home";
   let contactsComponent: Contacts;
   let relaysComponent: Relays;
   let relayEventsComponent: RelayEvents;
   let inboxScannerStatus: any = null;
   let isLoadingScanner = false;
+  let loginIdentifier = "";
 
   /**
    * Handle storage changes - refresh data when updated
    */
-  async function handleStorageChange(changes: { [key: string]: chrome.storage.StorageChange }, areaName: string) {
-    if (areaName !== 'local') return;
-    
+  async function handleStorageChange(
+    changes: { [key: string]: chrome.storage.StorageChange },
+    areaName: string,
+  ) {
+    if (areaName !== "local") return;
+
     // Check if userData or contactProfiles were updated
     if (changes.userData || changes.contactProfiles) {
-      console.log('Storage changed, refreshing UI...');
-      
+      console.log("Storage changed, refreshing UI...");
+
       // Re-check login status and fetch fresh data
       await checkLoginStatus();
     }
@@ -46,10 +62,10 @@
         await refreshData();
       }
     });
-    
+
     // Listen for storage changes to auto-refresh data
     chrome.storage.onChanged.addListener(handleStorageChange);
-    
+
     // Cleanup listener on unmount
     return () => {
       chrome.storage.onChanged.removeListener(handleStorageChange);
@@ -62,55 +78,52 @@
         type: MessageType.GET_LOGIN_STATUS,
       });
 
-      if (response.success && response.data) {
+      if (response && response.success && response.data) {
         isLoggedIn = response.data.isLoggedIn;
         userData = response.data.userData;
-        
+
         if (isLoggedIn) {
           await fetchContacts();
         }
+      } else if (response && !response.success) {
+        console.warn("Failed to check login status:", response.error);
       }
     } catch (err) {
-      console.error('Error checking login status:', err);
+      console.error("Error checking login status:", err);
     }
   }
 
   async function handleLogin() {
+    if (!loginIdentifier.trim()) {
+      error = "Please enter a pubkey, npub, or NIP-05 address";
+      return;
+    }
+
     isLoading = true;
-    error = '';
+    error = "";
 
     try {
-      // Connect to NIP-07 via tab injection (background handles this)
-      const connectResponse = await sendToBackground({
-        type: MessageType.CONNECT_NIP07,
-      });
-
-      if (!connectResponse.success) {
-        throw new Error(connectResponse.error || 'Failed to connect with NIP-07');
-      }
-
-      const { pubkey, relays } = connectResponse.data;
-
       // Send login request to background
       const loginResponse = await sendToBackground({
-        type: MessageType.NIP07_LOGIN,
-        payload: { pubkey, relays },
+        type: MessageType.SIMPLE_LOGIN,
+        payload: { identifier: loginIdentifier.trim() },
       });
 
       if (loginResponse.success) {
         userData = loginResponse.data;
         isLoggedIn = true;
-        
+        loginIdentifier = "";
+
         // Wait a bit for background to fetch data
         setTimeout(async () => {
           await fetchContacts();
         }, 2000);
       } else {
-        throw new Error(loginResponse.error || 'Login failed');
+        throw new Error(loginResponse.error || "Login failed");
       }
     } catch (err) {
-      console.error('Login error:', err);
-      error = err instanceof Error ? err.message : 'Unknown error occurred';
+      console.error("Login error:", err);
+      error = err instanceof Error ? err.message : "Unknown error occurred";
     } finally {
       isLoading = false;
     }
@@ -127,7 +140,7 @@
         contacts = response.data || [];
       }
     } catch (err) {
-      console.error('Error fetching contacts:', err);
+      console.error("Error fetching contacts:", err);
     } finally {
       isFetchingContacts = false;
     }
@@ -144,25 +157,25 @@
         inboxScannerStatus = response.data;
       }
     } catch (err) {
-      console.error('Error fetching inbox scanner status:', err);
+      console.error("Error fetching inbox scanner status:", err);
     } finally {
       isLoadingScanner = false;
     }
   }
 
   function showInboxScanner() {
-    currentView = 'inboxScanner';
+    currentView = "inboxScanner";
   }
 
   function formatTimeAgo(timestamp: number | null): string {
-    if (!timestamp) return 'Never';
-    
+    if (!timestamp) return "Never";
+
     const now = Date.now();
     const diff = now - timestamp;
     const minutes = Math.floor(diff / 60000);
     const hours = Math.floor(diff / 3600000);
-    
-    if (minutes < 1) return 'Just now';
+
+    if (minutes < 1) return "Just now";
     if (minutes < 60) return `${minutes} min ago`;
     if (hours < 24) return `${hours}h ago`;
     return `${Math.floor(hours / 24)}d ago`;
@@ -170,7 +183,7 @@
 
   async function refreshData() {
     isLoading = true;
-    error = '';
+    error = "";
     try {
       const response = await sendToBackground({
         type: MessageType.REFRESH_DATA,
@@ -179,52 +192,30 @@
       if (response.success) {
         userData = response.data;
         await fetchContacts();
-        
+
         // Also refresh the current view's specific data
-        if (currentView === 'contacts' && contactsComponent) {
+        if (currentView === "contacts" && contactsComponent) {
           await contactsComponent.fetchContacts();
-        } else if (currentView === 'relays' && relaysComponent) {
+        } else if (currentView === "relays" && relaysComponent) {
           await relaysComponent.fetchRelays();
         }
       } else {
-        throw new Error(response.error || 'Failed to refresh data');
+        throw new Error(response.error || "Failed to refresh data");
       }
     } catch (err) {
-      console.error('Error refreshing data:', err);
-      error = err instanceof Error ? err.message : 'Failed to refresh data';
-    } finally {
-      isLoading = false;
-    }
-  }
-
-  async function removeContact(pubkey: string) {
-    if (!confirm('Are you sure you want to remove this contact? This will publish a new contact list to the relays.')) {
-      return;
-    }
-
-    isLoading = true;
-    error = '';
-    try {
-      const response = await sendToBackground({
-        type: MessageType.REMOVE_CONTACT,
-        payload: { pubkey },
-      });
-
-      if (response.success) {
-        await fetchContacts();
-      } else {
-        throw new Error(response.error || 'Failed to remove contact');
-      }
-    } catch (err) {
-      console.error('Error removing contact:', err);
-      error = err instanceof Error ? err.message : 'Failed to remove contact';
+      console.error("Error refreshing data:", err);
+      error = err instanceof Error ? err.message : "Failed to refresh data";
     } finally {
       isLoading = false;
     }
   }
 
   async function handleLogout() {
-    if (!confirm('Are you sure you want to logout? This will clear all local data.')) {
+    if (
+      !confirm(
+        "Are you sure you want to logout? This will clear all local data.",
+      )
+    ) {
       return;
     }
 
@@ -238,58 +229,72 @@
         isLoggedIn = false;
         userData = null;
         contacts = [];
-        currentView = 'home';
+        currentView = "home";
       }
     } catch (err) {
-      console.error('Error logging out:', err);
+      console.error("Error logging out:", err);
     } finally {
       isLoading = false;
     }
   }
 
   function showContacts() {
-    currentView = 'contacts';
+    currentView = "contacts";
   }
 
   function showRelays() {
-    currentView = 'relays';
+    currentView = "relays";
   }
 
   function showRelayEvents() {
-    currentView = 'relayEvents';
+    currentView = "relayEvents";
   }
 
   function showHome() {
-    currentView = 'home';
+    currentView = "home";
   }
 </script>
 
 <main>
   <div class="header">
-    <h1><img src="./icon-128.png" alt="BotBox" style="height: 42px; vertical-align: middle;" /> BotBox</h1>
+    <h1>
+      <img
+        src="./icon-128.png"
+        alt="BotBox"
+        style="height: 42px; vertical-align: middle;"
+      /> BotBox
+    </h1>
   </div>
 
   {#if error}
     <div class="error">
       {error}
-      <button on:click={() => error = ''}><X size={18} /></button>
+      <button on:click={() => (error = "")}><X size={18} /></button>
     </div>
   {/if}
 
   {#if !isLoggedIn}
     <div class="login-container">
       <p class="info">
-        Connect with your Nostr extension (NIP-07) to manage your contacts.
+        Login with your Nostr public key to view your profile and contacts.
       </p>
       <p class="info-small">
-        Required: Alby, nos2x, or another NIP-07 compatible extension
+        Enter your npub, pubkey (hex), or NIP-05 address (user@domain.com)
       </p>
-      <button 
-        class="btn-primary" 
-        on:click={handleLogin} 
+      <input
+        type="text"
+        class="login-input"
+        placeholder="npub1... or user@domain.com or hex pubkey"
+        bind:value={loginIdentifier}
+        on:keydown={(e) => e.key === "Enter" && handleLogin()}
         disabled={isLoading}
+      />
+      <button
+        class="btn-primary"
+        on:click={handleLogin}
+        disabled={isLoading || !loginIdentifier.trim()}
       >
-        {isLoading ? 'Connecting...' : 'Connect with NIP-07'}
+        {isLoading ? "Logging in..." : "Login"}
       </button>
     </div>
   {:else}
@@ -302,17 +307,19 @@
         {/if}
         <div class="profile-details">
           <div class="name">
-            {userData?.profile?.display_name || userData?.profile?.name || 'Anonymous'}
+            {userData?.profile?.display_name ||
+              userData?.profile?.name ||
+              "Anonymous"}
           </div>
           <div class="pubkey" title={userData?.pubkey}>
-            {formatPubkey(userData?.pubkey || '')}
+            {formatPubkey(userData?.pubkey || "")}
           </div>
         </div>
       </div>
       <div class="actions">
-        <button 
-          class="btn-small" 
-          on:click={refreshData} 
+        <button
+          class="btn-small"
+          on:click={refreshData}
           disabled={isLoading}
           title="Refresh data from relays"
         >
@@ -322,23 +329,18 @@
             <RefreshCw size={16} />
           {/if}
         </button>
-        <button 
-          class="btn-small" 
-          on:click={handleLogout} 
-          disabled={isLoading}
-          title="Logout"
-        >
+        <button class="btn-small" on:click={handleLogout} title="Logout">
           <LogOut size={16} />
         </button>
       </div>
     </div>
 
-    {#if currentView === 'home'}
+    {#if currentView === "home"}
       <div class="stats">
-        <div 
-          class="stat stat-clickable" 
+        <div
+          class="stat stat-clickable"
           on:click={showContacts}
-          on:keydown={(e) => e.key === 'Enter' && showContacts()}
+          on:keydown={(e) => e.key === "Enter" && showContacts()}
           role="button"
           tabindex="0"
           title="Click to view all contacts"
@@ -346,10 +348,10 @@
           <div class="stat-value">{contacts.length}</div>
           <div class="stat-label">Contacts</div>
         </div>
-        <div 
-          class="stat stat-clickable" 
+        <div
+          class="stat stat-clickable"
           on:click={showRelays}
-          on:keydown={(e) => e.key === 'Enter' && showRelays()}
+          on:keydown={(e) => e.key === "Enter" && showRelays()}
           role="button"
           tabindex="0"
           title="Click to view all relays"
@@ -359,35 +361,37 @@
         </div>
         {#if userData?.lastUpdated}
           <div class="stat">
-            <div class="stat-value-small">{new Date(userData.lastUpdated).toLocaleString()}</div>
+            <div class="stat-value-small">
+              {new Date(userData.lastUpdated).toLocaleString()}
+            </div>
             <div class="stat-label">Last Updated</div>
           </div>
         {/if}
       </div>
 
-      <div 
+      <div
         class="info-box info-box-clickable"
         on:click={showRelayEvents}
-        on:keydown={(e) => e.key === 'Enter' && showRelayEvents()}
+        on:keydown={(e) => e.key === "Enter" && showRelayEvents()}
         role="button"
         tabindex="0"
         title="View relay events"
       >
         <div class="relay-info">
           <div class="relay-header">
-            <img src="./title.png" alt="" style="height: 16px; vertical-align: middle;" />
+            <span class="scanner-icon">📤</span>
             <strong>Outbox Model</strong>
           </div>
           <p class="relay-description">
-            Monitoring events from all your write and read relays. Click to view details.
+            Monitoring events from all your write and read relays.
           </p>
         </div>
       </div>
 
-      <div 
+      <div
         class="info-box info-box-clickable info-box-compact"
         on:click={showInboxScanner}
-        on:keydown={(e) => e.key === 'Enter' && showInboxScanner()}
+        on:keydown={(e) => e.key === "Enter" && showInboxScanner()}
         role="button"
         tabindex="0"
         title="View scanner"
@@ -398,24 +402,40 @@
             <strong>Relay Scanner</strong>
           </div>
           <p class="relay-description relay-description-small">
-            Scans other relays for events tagging you and broadcasts them to your inbox.
+            Scans other relays for events tagging you and broadcasts them to
+            your inbox.
           </p>
         </div>
       </div>
-    {:else if currentView === 'contacts'}
+      <div class="footer">
+        <small>
+          Made with 🐨 by
+          <a
+            href="https://njump.me/npub1v3tgrwwsv7c6xckyhm5dmluc05jxd4yeqhpxew87chn0kua0tjzqc6yvjh"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            KoalaSat
+          </a>
+        </small>
+      </div>
+    {:else if currentView === "contacts"}
       <div class="nav-header">
         <button class="btn-back" on:click={showHome}>
           <ArrowLeft size={16} />
           Back
         </button>
         <h2>Contacts</h2>
-        <button class="btn-back" on:click={() => window.open('https://following.space', '_blank')}>
-          Follow packs 
+        <button
+          class="btn-back"
+          on:click={() => window.open("https://following.space", "_blank")}
+        >
+          Follow packs
           <ExternalLink size={16} />
         </button>
       </div>
       <Contacts bind:this={contactsComponent} />
-    {:else if currentView === 'relays'}
+    {:else if currentView === "relays"}
       <div class="nav-header">
         <button class="btn-back" on:click={showHome}>
           <ArrowLeft size={16} />
@@ -425,20 +445,27 @@
         <div></div>
       </div>
       <Relays bind:this={relaysComponent} />
-    {:else if currentView === 'relayEvents'}
+    {:else if currentView === "relayEvents"}
       <div class="nav-header">
         <button class="btn-back" on:click={showHome}>
           <ArrowLeft size={16} />
           Back
         </button>
         <h2>Outbox Model</h2>
-        <button class="btn-back" on:click={() => window.open('https://www.whynostr.org/post/8yjqxm4sky-tauwjoflxs/', '_blank')}>
+        <button
+          class="btn-back"
+          on:click={() =>
+            window.open(
+              "https://www.whynostr.org/post/8yjqxm4sky-tauwjoflxs/",
+              "_blank",
+            )}
+        >
           Info
           <ExternalLink size={16} />
         </button>
       </div>
       <RelayEvents bind:this={relayEventsComponent} />
-    {:else if currentView === 'inboxScanner'}
+    {:else if currentView === "inboxScanner"}
       <div class="nav-header">
         <button class="btn-back" on:click={showHome}>
           <ArrowLeft size={16} />

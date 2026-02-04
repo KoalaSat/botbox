@@ -131,6 +131,11 @@ export class RelayListManager {
   private async getContactRelayListFromCache(pubkey: string): Promise<RelayMetadata[] | null> {
     try {
       const result = await chrome.storage.local.get(`relayList_${pubkey}`);
+      // Handle Firefox compatibility: result might be undefined
+      if (!result || typeof result !== 'object') {
+        return null;
+      }
+      
       const cached = result[`relayList_${pubkey}`];
       
       if (!cached) {

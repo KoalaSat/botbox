@@ -37,10 +37,8 @@
   let totalEoseReceived = 0;
   let userPubkey: string | null = null;
   let pollInterval: number;
-  let isLoadingEvents = true;
 
   onMount(async () => {
-    isLoadingEvents = true;
     await loadUserData();
     await fetchEvents();
 
@@ -72,11 +70,6 @@
         totalConnected = statusResponse.data.totalConnected || 0;
         totalRelays = statusResponse.data.totalRelays || 0;
         totalEoseReceived = statusResponse.data.totalEoseReceived || 0;
-
-        // Mark as done loading once all relays have sent EOSE
-        if (totalRelays > 0 && totalEoseReceived >= totalRelays) {
-          isLoadingEvents = false;
-        }
       }
 
       // Then fetch events
@@ -181,7 +174,7 @@
 
   <div class="page-container">
     <div class="stats-header">
-      {#if isLoadingEvents}
+      {#if isLoading}
         <div class="stat-item">
           <RefreshCw size={14} class="spin" />
           <span class="stat-text"
@@ -195,7 +188,7 @@
             class:connected={totalConnected > 0}
             class:disconnected={totalConnected === 0}
           ></span>
-          <span class="stat-text">{totalConnected} / {totalRelays} relays</span>
+          <span class="stat-text">{totalConnected} relays</span>
         </div>
       {/if}
       <div class="stat-item">

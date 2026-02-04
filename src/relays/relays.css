@@ -88,6 +88,18 @@
   color: var(--text-secondary);
 }
 
+.relay-type-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: white;
+  white-space: nowrap;
+  opacity: 0.9;
+}
+
 .relay-actions {
   display: flex;
   gap: 8px;

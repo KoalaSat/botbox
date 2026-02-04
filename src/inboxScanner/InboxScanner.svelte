@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { sendToBackground } from '../shared/messaging';
   import { MessageType } from '../shared/messaging';
-  import { RefreshCw } from 'lucide-svelte';
+  import { RefreshCw, Square } from 'lucide-svelte';
 
   interface ScannerStatus {
     isScanning: boolean;
@@ -14,6 +14,7 @@
   let status: ScannerStatus | null = null;
   let isLoading = false;
   let isScanning = false;
+  let isStopping = false;
   let pollInterval: number | null = null;
 
   onMount(() => {
@@ -64,6 +65,23 @@
     }
   }
 
+  async function stopScan() {
+    isStopping = true;
+    try {
+      const response = await sendToBackground({
+        type: MessageType.STOP_INBOX_SCAN,
+      });
+
+      if (response.success) {
+        await fetchStatus();
+      }
+    } catch (err) {
+      console.error('Error stopping scan:', err);
+    } finally {
+      isStopping = false;
+    }
+  }
+
   function formatTime(timestamp: number | null): string {
     if (!timestamp) return 'Never';
     return new Date(timestamp).toLocaleString();
@@ -102,18 +120,29 @@
       </div>
 
       <div class="scanner-actions">
-        <button 
-          class="btn btn-scan" 
-          on:click={triggerScan} 
-          disabled={isScanning || status.isScanning}
-        >
-          {#if isScanning || status.isScanning}
-            <RefreshCw size={16} class="spin" />
-          {:else}
-            <RefreshCw size={16} />
-          {/if}
-          {status.isScanning ? 'Scanning...' : 'Scan Now'}
-        </button>
+        {#if status.isScanning}
+          <button 
+            class="btn btn-stop" 
+            on:click={stopScan} 
+            disabled={isStopping}
+          >
+            <Square size={16} />
+            {isStopping ? 'Stopping...' : 'Stop Scan'}
+          </button>
+        {:else}
+          <button 
+            class="btn btn-scan" 
+            on:click={triggerScan} 
+            disabled={isScanning}
+          >
+            {#if isScanning}
+              <RefreshCw size={16} class="spin" />
+            {:else}
+              <RefreshCw size={16} />
+            {/if}
+            Scan & Broadcast Now
+          </button>
+        {/if}
       </div>
     </div>
   {/if}
@@ -219,6 +248,15 @@
 
   .btn-scan:hover:not(:disabled) {
     background: var(--primary-hover);
+  }
+
+  .btn-stop {
+    background: var(--danger-color, #dc3545);
+    color: white;
+  }
+
+  .btn-stop:hover:not(:disabled) {
+    background: var(--danger-hover, #c82333);
   }
 
   :global(.spin) {

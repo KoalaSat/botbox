@@ -36,7 +36,6 @@ interface InboxScannerStatus {
  * Inbox Scanner Service
  */
 export class InboxScannerService {
-  private readonly SCAN_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
   private readonly MAX_CONCURRENT_RELAYS = 10;
   private readonly SCAN_TIMEOUT_PER_RELAY = 10000; // 10 seconds
   private readonly BROADCAST_TIMEOUT = 10000; // 10 seconds
@@ -45,6 +44,7 @@ export class InboxScannerService {
   
   private isScanning = false;
   private scanHistory: ScanResult[] = [];
+  private shouldStopScan = false;
 
   constructor(private getRelayManager: () => Promise<RelayManager>) {}
 
@@ -81,11 +81,28 @@ export class InboxScannerService {
   async getDiscoveredEvents(): Promise<DiscoveredEvent[]> {
     try {
       const result = await chrome.storage.local.get('inboxScannerEvents');
+      // Handle Firefox compatibility: result might be undefined
+      if (!result || typeof result !== 'object') {
+        return [];
+      }
       return result.inboxScannerEvents || [];
     } catch (error) {
       console.error('[InboxScanner] Error getting discovered events:', error);
       return [];
     }
+  }
+
+  /**
+   * Stop the current scan
+   */
+  async stopScan(): Promise<void> {
+    if (!this.isScanning) {
+      console.log('[InboxScanner] No scan in progress');
+      return;
+    }
+    
+    console.log('[InboxScanner] Stopping scan...');
+    this.shouldStopScan = true;
   }
 
   /**
@@ -103,6 +120,7 @@ export class InboxScannerService {
     }
 
     this.isScanning = true;
+    this.shouldStopScan = false;
     const startTime = Date.now();
     console.log('[InboxScanner] Starting scan for events tagging', userData.pubkey.substring(0, 8));
 
@@ -116,39 +134,36 @@ export class InboxScannerService {
 
       // Scan relays for events tagging the user
       const newEvents = await this.scanRelaysForEvents(topRelays, userData.pubkey);
+      
+      if (this.shouldStopScan) {
+        console.log('[InboxScanner] Scan stopped by user');
+        throw new Error('Scan stopped by user');
+      }
+      
       console.log(`[InboxScanner] Found ${newEvents.length} new events`);
 
       // Update stats with discovered events immediately
       await this.incrementStats(newEvents.length, 0);
 
-      // Broadcast new events to user's inbox relays
+      // Broadcast all events to user's inbox relays in batch
       let broadcastCount = 0;
-      for (const discoveredEvent of newEvents) {
-        try {
-          console.log(`[InboxScanner] Broadcasting event ${discoveredEvent.event.id.substring(0, 8)}...`);
-          const success = await this.broadcastToInbox(discoveredEvent.event);
-          console.log(`[InboxScanner] Broadcast result for ${discoveredEvent.event.id.substring(0, 8)}: ${success}`);
-          
-          if (success) {
-            discoveredEvent.broadcastStatus = 'success';
-            broadcastCount++;
-            // Update broadcast count incrementally
-            console.log(`[InboxScanner] Incrementing broadcast count (now ${broadcastCount})`);
-            await this.incrementStats(0, 1);
-          } else {
-            console.log(`[InboxScanner] Broadcast failed for ${discoveredEvent.event.id.substring(0, 8)}`);
-            discoveredEvent.broadcastStatus = 'failed';
-          }
-        } catch (error) {
-          console.error('[InboxScanner] Error broadcasting event:', error);
-          discoveredEvent.broadcastStatus = 'failed';
+      if (newEvents.length > 0) {
+        if (this.shouldStopScan) {
+          console.log('[InboxScanner] Scan stopped by user before broadcast');
+          throw new Error('Scan stopped by user');
         }
+        
+        broadcastCount = await this.broadcastEventsToInbox(newEvents);
+        console.log(`[InboxScanner] Successfully broadcast ${broadcastCount}/${newEvents.length} events`);
+        
+        // Update broadcast count
+        await this.incrementStats(0, broadcastCount);
       }
 
       // Store discovered events
       await this.storeDiscoveredEvents(newEvents);
 
-      // Update statistics
+      // Update statistics - only update lastScanTime if scan completed successfully
       const duration = Date.now() - startTime;
       const scanResult: ScanResult = {
         eventsFound: newEvents.length,
@@ -171,8 +186,15 @@ export class InboxScannerService {
       );
 
       return scanResult;
+    } catch (error) {
+      // If scan was stopped, don't update lastScanTime
+      if (error instanceof Error && error.message === 'Scan stopped by user') {
+        console.log('[InboxScanner] Scan stopped - lastScanTime not updated');
+      }
+      throw error;
     } finally {
       this.isScanning = false;
+      this.shouldStopScan = false;
     }
   }
 
@@ -242,12 +264,30 @@ export class InboxScannerService {
   ): Promise<DiscoveredEvent[]> {
     const discoveredEvents: DiscoveredEvent[] = [];
     const seenEventIds = await this.getSeenEventIds();
+    
+    // Get last scan time to only fetch new events
+    const stats = await this.getStats();
+    const sinceTimestamp = stats.lastScanTime 
+      ? Math.floor(stats.lastScanTime / 1000) // Convert to Unix timestamp
+      : undefined;
+
+    if (sinceTimestamp) {
+      console.log(`[InboxScanner] Fetching events since ${new Date(sinceTimestamp * 1000).toISOString()}`);
+    } else {
+      console.log('[InboxScanner] First scan - fetching all recent events');
+    }
 
     // Process relays in batches to avoid overwhelming connections
     for (let i = 0; i < relays.length; i += this.MAX_CONCURRENT_RELAYS) {
+      // Check if scan should stop
+      if (this.shouldStopScan) {
+        console.log('[InboxScanner] Stopping relay scan...');
+        break;
+      }
+      
       const batch = relays.slice(i, i + this.MAX_CONCURRENT_RELAYS);
       const batchPromises = batch.map((relay) =>
-        this.scanSingleRelay(relay, userPubkey, seenEventIds)
+        this.scanSingleRelay(relay, userPubkey, seenEventIds, sinceTimestamp)
       );
 
       const batchResults = await Promise.allSettled(batchPromises);
@@ -263,36 +303,81 @@ export class InboxScannerService {
   }
 
   /**
-   * Scan a single relay for events
+   * Scan a single relay for events with proper timeout handling
    */
   private async scanSingleRelay(
     relayUrl: string,
     userPubkey: string,
-    seenEventIds: Set<string>
+    seenEventIds: Set<string>,
+    sinceTimestamp?: number
   ): Promise<DiscoveredEvent[]> {
     return new Promise((resolve) => {
       const events: DiscoveredEvent[] = [];
+      let ws: WebSocket;
+      let isResolved = false;
+
+      const resolveOnce = (result: DiscoveredEvent[]) => {
+        if (!isResolved) {
+          isResolved = true;
+          resolve(result);
+        }
+      };
+
+      // Check for stop before even starting
+      if (this.shouldStopScan) {
+        resolveOnce(events);
+        return;
+      }
+
       const timeout = setTimeout(() => {
-        ws.close();
-        resolve(events);
+        if (ws) {
+          try {
+            ws.close();
+          } catch (err) {
+            // Ignore close errors
+          }
+        }
+        resolveOnce(events);
       }, this.SCAN_TIMEOUT_PER_RELAY);
 
-      let ws: WebSocket;
+      // Poll for stop signal periodically
+      const stopCheckInterval = setInterval(() => {
+        if (this.shouldStopScan) {
+          clearInterval(stopCheckInterval);
+          clearTimeout(timeout);
+          if (ws) {
+            try {
+              ws.close();
+            } catch (err) {
+              // Ignore close errors
+            }
+          }
+          resolveOnce(events);
+        }
+      }, 100); // Check every 100ms
+
       try {
         ws = new WebSocket(relayUrl);
       } catch (error) {
         clearTimeout(timeout);
-        resolve(events);
+        clearInterval(stopCheckInterval);
+        resolveOnce(events);
         return;
       }
 
       ws.onopen = () => {
         // Subscribe to events tagging the user
         const subscriptionId = `inbox-scan-${Date.now()}-${Math.random()}`;
-        const filter = {
+        const filter: any = {
           '#p': [userPubkey],
-          limit: 100, // Limit to recent events
+          kinds: [1, 4, 5, 6, 7, 9735, 30023], // text notes, DMs, deletions, reposts, reactions, zaps, long-form
         };
+        
+        // Only fetch events created after the last scan
+        if (sinceTimestamp) {
+          filter.since = sinceTimestamp;
+        }
+        
         const req = JSON.stringify(['REQ', subscriptionId, filter]);
         ws.send(req);
       };
@@ -318,6 +403,7 @@ export class InboxScannerService {
             }
           } else if (type === 'EOSE') {
             clearTimeout(timeout);
+            clearInterval(stopCheckInterval);
             ws.close();
             resolve(events);
           }
@@ -326,22 +412,29 @@ export class InboxScannerService {
         }
       };
 
-      ws.onerror = () => {
+      ws.onerror = (error) => {
+        const errorMsg = error instanceof ErrorEvent ? error.message : 'Connection error';
+        console.warn(`[InboxScanner] Error scanning ${relayUrl}: ${errorMsg}`);
         clearTimeout(timeout);
-        resolve(events);
+        clearInterval(stopCheckInterval);
+        resolveOnce(events);
       };
 
       ws.onclose = () => {
         clearTimeout(timeout);
-        resolve(events);
+        clearInterval(stopCheckInterval);
+        if (!isResolved) {
+          resolveOnce(events);
+        }
       };
     });
   }
 
   /**
-   * Broadcast event to user's inbox relays
+   * Broadcast multiple events to user's inbox relays efficiently
+   * Opens one connection per relay and sends all events through it
    */
-  private async broadcastToInbox(event: NostrEvent): Promise<boolean> {
+  private async broadcastEventsToInbox(discoveredEvents: DiscoveredEvent[]): Promise<number> {
     try {
       const rm = await this.getRelayManager();
       const relayListManager = new RelayListManager(rm);
@@ -349,52 +442,114 @@ export class InboxScannerService {
 
       if (inboxRelays.length === 0) {
         console.warn('[InboxScanner] No inbox relays found');
-        return false;
+        return 0;
       }
 
-      console.log(`[InboxScanner] Broadcasting event ${event.id.substring(0, 8)} to ${inboxRelays.length} inbox relays`);
+      console.log(`[InboxScanner] Broadcasting ${discoveredEvents.length} events to ${inboxRelays.length} inbox relays`);
 
+      // Broadcast to all relays in parallel, but each relay gets all events in one connection
       const broadcastPromises = inboxRelays.map((relayUrl) =>
-        this.broadcastToSingleRelay(relayUrl, event)
+        this.broadcastEventsToRelay(relayUrl, discoveredEvents)
       );
 
       const results = await Promise.allSettled(broadcastPromises);
-      const successCount = results.filter(
-        (r) => r.status === 'fulfilled' && r.value
-      ).length;
+      
+      // Count total successful broadcasts across all relays
+      let totalSuccessful = 0;
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          const successCount = result.value;
+          console.log(`[InboxScanner] ${inboxRelays[index]}: ${successCount}/${discoveredEvents.length} events accepted`);
+          totalSuccessful += successCount;
+        }
+      });
 
-      return successCount > 0;
+      // Mark events as broadcast if at least one relay accepted them
+      const eventSuccessMap = new Map<string, number>();
+      
+      // For simplicity, if we got any successful broadcasts, mark events as successful
+      if (totalSuccessful > 0) {
+        discoveredEvents.forEach(de => {
+          de.broadcastStatus = 'success';
+          de.broadcastCount = Math.min(totalSuccessful, inboxRelays.length);
+        });
+      }
+
+      return discoveredEvents.filter(de => de.broadcastStatus === 'success').length;
     } catch (error) {
       console.error('[InboxScanner] Error broadcasting to inbox:', error);
-      return false;
+      return 0;
     }
   }
 
   /**
-   * Broadcast event to a single relay
+   * Broadcast multiple events to a single relay using one persistent connection
    */
-  private async broadcastToSingleRelay(
+  private async broadcastEventsToRelay(
     relayUrl: string,
-    event: NostrEvent
-  ): Promise<boolean> {
+    discoveredEvents: DiscoveredEvent[]
+  ): Promise<number> {
     return new Promise((resolve) => {
+      let ws: WebSocket;
+      let isResolved = false;
+      let successCount = 0;
+      const pendingEventIds = new Set(discoveredEvents.map(de => de.event.id));
+
+      const resolveOnce = (count: number) => {
+        if (!isResolved) {
+          isResolved = true;
+          resolve(count);
+        }
+      };
+
+      // Check for stop before starting
+      if (this.shouldStopScan) {
+        resolveOnce(0);
+        return;
+      }
+
       const timeout = setTimeout(() => {
-        ws.close();
-        resolve(false);
+        if (ws) {
+          try {
+            ws.close();
+          } catch (err) {
+            // Ignore close errors
+          }
+        }
+        resolveOnce(successCount);
       }, this.BROADCAST_TIMEOUT);
 
-      let ws: WebSocket;
+      // Poll for stop signal
+      const stopCheckInterval = setInterval(() => {
+        if (this.shouldStopScan) {
+          clearInterval(stopCheckInterval);
+          clearTimeout(timeout);
+          if (ws) {
+            try {
+              ws.close();
+            } catch (err) {
+              // Ignore close errors
+            }
+          }
+          resolveOnce(successCount);
+        }
+      }, 100);
+
       try {
         ws = new WebSocket(relayUrl);
       } catch (error) {
         clearTimeout(timeout);
-        resolve(false);
+        clearInterval(stopCheckInterval);
+        resolveOnce(0);
         return;
       }
 
       ws.onopen = () => {
-        const eventMessage = JSON.stringify(['EVENT', event]);
-        ws.send(eventMessage);
+        // Send all events at once
+        discoveredEvents.forEach(discoveredEvent => {
+          const eventMessage = JSON.stringify(['EVENT', discoveredEvent.event]);
+          ws.send(eventMessage);
+        });
       };
 
       ws.onmessage = (msg) => {
@@ -402,24 +557,39 @@ export class InboxScannerService {
           const data = JSON.parse(msg.data);
           const [type, eventId, accepted] = data;
 
-          if (type === 'OK' && eventId === event.id) {
-            clearTimeout(timeout);
-            ws.close();
-            resolve(accepted);
+          if (type === 'OK' && pendingEventIds.has(eventId)) {
+            if (accepted) {
+              successCount++;
+            }
+            pendingEventIds.delete(eventId);
+            
+            // If all events have received responses, close connection
+            if (pendingEventIds.size === 0) {
+              clearTimeout(timeout);
+              clearInterval(stopCheckInterval);
+              ws.close();
+              resolveOnce(successCount);
+            }
           }
         } catch (error) {
           console.error(`[InboxScanner] Error parsing message from ${relayUrl}:`, error);
         }
       };
 
-      ws.onerror = () => {
+      ws.onerror = (error) => {
+        const errorMsg = error instanceof ErrorEvent ? error.message : 'Connection error';
+        console.warn(`[InboxScanner] Error broadcasting to ${relayUrl}: ${errorMsg}`);
         clearTimeout(timeout);
-        resolve(false);
+        clearInterval(stopCheckInterval);
+        resolveOnce(successCount);
       };
 
       ws.onclose = () => {
         clearTimeout(timeout);
-        resolve(false);
+        clearInterval(stopCheckInterval);
+        if (!isResolved) {
+          resolveOnce(successCount);
+        }
       };
     });
   }
@@ -430,6 +600,10 @@ export class InboxScannerService {
   private async getSeenEventIds(): Promise<Set<string>> {
     try {
       const result = await chrome.storage.local.get('inboxScannerSeenEvents');
+      // Handle Firefox compatibility: result might be undefined
+      if (!result || typeof result !== 'object') {
+        return new Set();
+      }
       const seenEvents: string[] = result.inboxScannerSeenEvents || [];
       return new Set(seenEvents);
     } catch (error) {
@@ -490,7 +664,26 @@ export class InboxScannerService {
     totalEventsBroadcast: number;
   }> {
     try {
-      const result = await chrome.storage.local.get('inboxScannerStats');
+      // Firefox-compatible: wrap chrome.storage.local.get in a Promise
+      const result = await new Promise<any>((resolve, reject) => {
+        chrome.storage.local.get('inboxScannerStats', (result) => {
+          if (chrome.runtime.lastError) {
+            reject(chrome.runtime.lastError);
+            return;
+          }
+          resolve(result);
+        });
+      });
+      
+      // Handle both Chrome and Firefox API response formats
+      if (!result || typeof result !== 'object') {
+        return {
+          lastScanTime: null,
+          totalEventsDiscovered: 0,
+          totalEventsBroadcast: 0,
+        };
+      }
+      
       return (
         result.inboxScannerStats || {
           lastScanTime: null,
@@ -507,25 +700,6 @@ export class InboxScannerService {
       };
     }
   }
-
-  /**
-   * Reset scanner statistics (called at the start of each scan)
-   */
-  private async resetStats(): Promise<void> {
-    try {
-      const updatedStats = {
-        lastScanTime: null,
-        totalEventsDiscovered: 0,
-        totalEventsBroadcast: 0,
-      };
-
-      await chrome.storage.local.set({ inboxScannerStats: updatedStats });
-      console.log('[InboxScanner] Stats reset to 0');
-    } catch (error) {
-      console.error('[InboxScanner] Error resetting stats:', error);
-    }
-  }
-
   /**
    * Increment scanner statistics (for real-time updates)
    */

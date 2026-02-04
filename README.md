@@ -2,29 +2,40 @@
 
 ![Title](assets/title.png)
 
-A browser extension for managing your Nostr contacts locally using NIP-02 and NIP-07.
+A browser extension for bringing consistency to your chaotic relays.
 
-### Load in Browser
+## Browser Support
+
+✅ **Chrome and other Chromium browsers** (Manifest V3)  
+✅ **Firefox and LibreWolf** (Manifest V2)  
+
+### Installation
 
 #### Chrome/Edge/Brave
 
-1. Open `chrome://extensions/` (or `edge://extensions/`, `brave://extensions/`)
-2. Enable "Developer mode" (toggle in top right)
-3. Click "Load unpacked"
-4. Select the `dist/` directory from the project
+1. Build the extension: `npm run build:chrome`
+2. Open `chrome://extensions/` (or `edge://extensions/`, `brave://extensions/`)
+3. Enable "Developer mode" (toggle in top right)
+4. Click "Load unpacked"
+5. Select the `dist-chrome/` directory from the project
 
 #### Firefox
 
-1. Open `about:debugging#/runtime/this-firefox`
-2. Click "Load Temporary Add-on"
-3. Navigate to `dist/` directory and select `manifest.json`
+1. Build the extension: `npm run build:firefox`
+2. Open `about:debugging#/runtime/this-firefox`
+3. Click "Load Temporary Add-on"
+4. Select the `dist-firefox/botbox-firefox.xpi` file (or any file in `dist-firefox/`)
 
 ## Development
 
-### Build
+### Build Commands
 
 ```bash
-npm run build
+# Build for Chrome (Manifest V3)
+npm run build:chrome
+
+# Build for Firefox (Manifest V2) 
+npm run build:firefox
 ```
 
 ### Prerequisites
@@ -57,7 +68,7 @@ npm install
 npm run build
 ```
 
-The built extension will be in the `dist/` directory.
+The built extensions will be in the `dist-chrome/` and `dist-firefox/` directories.
 
 ### Contributing
 
