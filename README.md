@@ -96,5 +96,3 @@ Built with:
 
 - [Nostr Protocol](https://github.com/nostr-protocol/nostr)
 - [NIPs Repository](https://github.com/nostr-protocol/nips)
-- [Alby Extension](https://getalby.com/)
-- [nos2x Extension](https://github.com/fiatjaf/nos2x)
