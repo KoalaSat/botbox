@@ -4,6 +4,12 @@
 
 A browser extension for bringing consistency to your chaotic relays.
 
+Botbox continuously monitors your inbox and outbox relays:
+
+- It makes sure all your events are available according the [Outbox Model](https://www.whynostr.org/post/8yjqxm4sky-tauwjoflxs/)
+- Allows to scan a big list of relays looking for orphan events you should have received
+- (....WIP)
+
 ## Browser Support
 
 ✅ **Chrome and other Chromium browsers** (Manifest V3)  
